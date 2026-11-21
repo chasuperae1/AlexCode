@@ -1,0 +1,96 @@
+{
+  "theme": "crimson",
+  "model": {
+    "provider": "deepseek",
+    "name": "deepseek-flash",
+    "api_key_env": "API_KEY",
+    "base_url": "https://api.deepseek.com",
+    "context_size": 128000,
+    "context_trigger_ratio": 0.8,
+    "max_iters": 50,
+    "vision": false,
+    "reasoning": {
+      "default": "high",
+      "current": "high"
+    }
+  },
+  "model_profiles": [
+    {
+      "provider": "deepseek",
+      "name": "deepseek-flash",
+      "api_key_env": "API_KEY",
+      "base_url": "https://api.deepseek.com",
+      "vision": false,
+      "reasoning": {
+        "default": "high"
+      }
+    },
+    {
+      "provider": "deepseek",
+      "name": "deepseek-reasoner",
+      "api_key_env": "API_KEY",
+      "base_url": "https://api.deepseek.com",
+      "vision": false,
+      "reasoning": {
+        "default": "high"
+      }
+    }
+  ],
+  "workdir": "C:\\Users\\13630\\Desktop\\Alex_agent\\agent_workspace",
+  "permission_mode": "bypass",
+  "dangerous_commands": [
+    "\\bformat\\b",
+    "\\bdiskpart\\b",
+    "\\bshutdown\\b",
+    "\\bbcdedit\\b",
+    "\\breg\\s+(?:add|delete|import|load|restore|save|unload)\\b",
+    "\\bdel\\b",
+    "\\berase\\b",
+    "\\brd\\b",
+    "\\brmdir\\b",
+    "\\bmove\\b",
+    "\\bren(?:ame)?\\b",
+    "\\bcopy\\b",
+    "\\bxcopy\\b",
+    "\\brobocopy\\b",
+    "\\bmkdir\\b",
+    "\\bmklink\\b",
+    "\\battrib\\b",
+    "\\bicacls\\b",
+    "\\btakeown\\b",
+    "\\bcipher\\s+/w\\b",
+    "\\bnet\\s+(?:user|localgroup)\\b",
+    "\\bsc\\s+delete\\b",
+    "\\bschtasks\\b.*?/delete\\b",
+    "\\btaskkill\\b",
+    "\\bwmic\\b",
+    "\\bgit\\s+push\\b.*?(?:--force\\b|-f\\b)",
+    "\\bgit\\s+reset\\s+--hard\\b",
+    "\\bgit\\s+clean\\b.*?\\s-\\w*f",
+    "(?<![0-9&])>>?(?!&)"
+  ],
+  "memory_dir": "data/Memory",
+  "snapshot_dir": "data/snapshots",
+  "snapshot_exclude": [
+    ".git/**",
+    "node_modules/**",
+    ".venv/**",
+    "venv/**",
+    "__pycache__/**",
+    "*.pyc",
+    "dist/**",
+    "build/**"
+  ],
+  "memory_consolidation_minutes": 30,
+  "memory_max_chars": 8000,
+  "memory_retention_days": 30,
+  "rules_dir": "rules",
+  "excluded_rules": [],
+  "extra_rules": [
+    "AGENTS.md"
+  ],
+  "skills_dir": "skills",
+  "excluded_skills": [],
+  "session_file": "data/sessions/default.json",
+  "mcp_config": "config/mcp_servers.json"
+}
