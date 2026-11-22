@@ -36,7 +36,7 @@
       }
     }
   ],
-  "workdir": "C:\\Users\\13630\\Desktop\\Alex_agent\\agent_workspace",
+  "workdir": "agent_workspace",
   "permission_mode": "accept",
   "dangerous_commands": [
     "\\bformat\\b",

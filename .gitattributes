@@ -1,0 +1,22 @@
+# 默认按文本处理，换行交给各平台自行检出
+* text=auto
+
+# Windows 脚本保持 CRLF，否则双击运行与 cmd 解析都会出问题
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+
+# 二进制与归档，避免被当成文本做 diff
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.webp binary
+*.pdf  binary
+*.docx binary
+*.xlsx binary
+*.pptx binary
+*.zip  binary
+*.7z   binary
+*.gz   binary
