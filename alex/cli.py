@@ -9,17 +9,17 @@ from pathlib import Path
 import agentscope
 from agentscope.message import UserMsg
 
-from .agent import build_agent, build_mcps, build_model, save_state
-from .config import CONFIG, ROOT, project_path, save_config, workspace_path
-from .memory import clear_memory, find_memory_middleware
-from .permissions import (
+from alex.core.agent import build_agent, build_mcps, build_model, save_state
+from alex.config import CONFIG, ROOT, project_path, save_config, workspace_path
+from alex.memory import clear_memory, find_memory_middleware
+from alex.core.permissions import (
     MODE_NAMES,
     ConfirmChoice,
     PermissionGate,
     permission_detail,
     resolve_permission_mode,
 )
-from .tools import TrackedLocalBackend
+from alex.core.tools import TrackedLocalBackend
 
 
 async def _terminal_confirm(agent_name, tool, tool_input, decision) -> ConfirmChoice:
@@ -79,7 +79,7 @@ async def _run_goal(agent, model, backend, text: str) -> str:
     """跑一次 GoalPipeline，返回验收结束时的文本。"""
     from agentscope.pipeline import GoalPipeline
 
-    from .agent import build_verifier
+    from alex.core.agent import build_verifier
 
     pipeline = GoalPipeline(
         executor=agent,

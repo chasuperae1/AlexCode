@@ -85,7 +85,7 @@ description: AlexCode 的功能说明书：TUI 命令与快捷键、模型与思
 
 ## 6. 主题
 
-内置五套：Crimson（默认）、Dark、Light、Mono（白底黑线）、Claude（暖橙）。
+内置五套：Crimson（默认）、Dark、Light、Mono（白底黑线）、Ember（暖橙）。
 `/theme` 弹窗选择或 `Ctrl+T` 循环，选择结果持久化在 `data/tui.json`，重启保持。
 启动页字符画、阶段圆点、进度条都会跟随主题色。
 
