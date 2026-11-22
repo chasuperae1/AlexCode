@@ -1,47 +1,53 @@
-# 安全政策
+# Security Policy
 
-## 上报渠道
+## Reporting a vulnerability
 
-请**不要**开公开 issue。用下面任一渠道私密上报：
+Please **do not** open a public issue. Report privately through either channel:
 
-- 邮件：`chasuperae1@gmail.com`，标题以 `[SECURITY] AlexCode` 开头。
-- GitHub Security Advisories（仓库 Security 标签页 → Report a vulnerability），推荐。
+- Email: `chasuperae1@gmail.com`, with `[SECURITY] AlexCode` in the subject.
+- GitHub Security Advisories (repository Security tab → Report a vulnerability) — preferred.
 
-邮件里请包含：受影响版本 / commit、复现步骤或 PoC、影响面（能否读文件、能否执行命令、
-是否需要用户交互）、以及你希望如何被致谢。
+Include the affected version or commit, reproduction steps or a proof of concept, the impact
+(can it read files, execute commands, does it need user interaction), and how you would like
+to be credited.
 
-## 响应约定
+## Response timeline
 
-| 阶段 | 目标时间 |
+| Stage | Target |
 |---|---|
-| 确认收到 | 3 个工作日内 |
-| 初步判断与影响评估 | 7 个工作日内 |
-| 修复或缓解方案 | 30 天内，复杂问题会同步进度 |
+| Acknowledgement | within 3 business days |
+| Initial assessment | within 7 business days |
+| Fix or mitigation | within 30 days; complex issues get progress updates |
 
-修复发布后会在 `CHANGELOG.md` 与 GitHub Security Advisory 里致谢（除非你要求匿名）。
+Once a fix is released it is credited in `CHANGELOG.md` and the GitHub Security Advisory,
+unless you ask to stay anonymous.
 
-## 范围
+## Scope
 
-以下属于安全问题的处理范围：
+In scope:
 
-- 绕过权限确认：`accept` / `explore` 模式下本应拦截的写操作或危险命令被执行。
-- 危险命令正则被简单变形绕过（如 `rm` 的等价写法、管道与重定向逃逸）。
-- 密钥泄露：日志、快照、记忆文件、错误信息里出现 `.env` 内容。
-- 路径越界：工具读写跑到工作区与用户明确授权目录之外。
-- 提示注入导致 agent 执行未授权操作、外发本地文件。
-- MCP 配置解析导致的命令注入。
-- 会话快照/回溯恢复出错导致覆盖用户文件。
+- Permission bypass: writes or dangerous commands that should be blocked in `accept` / `explore`
+  mode but execute anyway.
+- Trivial evasions of the dangerous-command regex (equivalent spellings of `rm`, pipe and
+  redirect escapes).
+- Secret leakage: `.env` contents appearing in logs, snapshots, memory files or error messages.
+- Path escape: tools reading or writing outside the workspace and explicitly authorized directories.
+- Prompt injection leading the agent to run unauthorized actions or exfiltrate local files.
+- Command injection through MCP configuration parsing.
+- Snapshot / rewind bugs that overwrite user files.
 
-以下**不属于**本项目安全边界，但仍欢迎讨论：
+Out of scope for this project (still welcome to discuss):
 
-- 用户在 `bypass` 模式下主动放行危险操作。
-- 模型自身输出的错误内容（内容风险由模型服务商与其策略承担）。
-- 第三方依赖（agentscope / textual / python-dotenv）自身漏洞——请同时上报上游。
-- 你自己机器上的弱口令、共享屏幕泄露等环境问题。
+- A user deliberately approving dangerous actions in `bypass` mode.
+- Incorrect model output — content risk is governed by the model provider and its policies.
+- Vulnerabilities in third-party dependencies (agentscope / textual / python-dotenv); please
+  also report upstream.
+- Local environment issues such as weak passwords or leaking your screen.
 
-## 使用侧提醒
+## Notes for users
 
-- `bypass` 模式会跳过所有确认，仅在完全信任当前任务时使用。
-- `.env` 与 `config/mcp_servers.json` 不要提交、不要贴进聊天、不要放进截图。
-- 在陌生仓库里先用 `explore` 模式让它在只读状态跑一轮。
-- 记忆与快照默认落在 `data/`，里面会包含你的对话内容，分享项目目录前记得清理。
+- `bypass` skips every confirmation; use it only when you fully trust the task.
+- Keep `.env` and `config/mcp_servers.json` out of commits, chats and screenshots.
+- Run in `explore` mode for a first pass in an unfamiliar repository.
+- Memory and snapshots live under `data/` and contain your conversations; clean them before
+  sharing the project directory.

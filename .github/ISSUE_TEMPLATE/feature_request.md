@@ -1,21 +1,21 @@
 ---
-name: 功能建议
-about: 提出新能力或体验改进
+name: Feature request
+about: Suggest a new capability or UX improvement
 title: "[feat] "
 labels: enhancement
 assignees: ''
 ---
 
-## 想解决什么问题
+## What problem are you hitting
 
-描述你实际遇到的场景，而不是只给方案。
+Describe the real scenario, not only the solution.
 
-## 你希望的方案
+## Proposed solution
 
-## 你考虑过的替代方案
+## Alternatives considered
 
-## 影响面
+## Impact
 
-- 是否新增依赖：
-- 是否改动 `config/config.json` 字段：
-- 是否影响权限模型（`accept` / `bypass` / `explore`）：
+- Does it add a dependency:
+- Does it change `config/config.json` fields:
+- Does it affect the permission model (`accept` / `bypass` / `explore`):

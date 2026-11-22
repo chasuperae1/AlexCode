@@ -1,13 +1,13 @@
-# 贡献指南
+# Contributing
 
-感谢你愿意改进 AlexCode。这个项目是一个偏个人向的终端 Agent，改动可能很快，
-但下面的约定是稳定的。
+Thanks for wanting to improve AlexCode. It is a personal terminal agent, so things can move
+quickly, but the conventions below are stable.
 
-## 开始之前
+## Before you start
 
-- Python 3.10+（推荐 3.11–3.13）。
-- 需要 Node.js 才能用示例里的 `filesystem` / `playwright` MCP，纯跑核心功能可以不需要。
-- 不要提交真实密钥。`.env` 已被忽略，`config/mcp_servers.json` 也不进仓库。
+- Python 3.10+ (3.11–3.13 recommended).
+- Node.js is only needed for the `filesystem` / `playwright` MCP servers; the core runs without it.
+- Never commit real credentials. `.env` is ignored, and so is `config/mcp_servers.json`.
 
 ```powershell
 git clone https://github.com/chasuperae1/AlexCode.git
@@ -18,67 +18,75 @@ pip install -r requirements.txt
 Copy-Item .env.example .env
 ```
 
-## 代码约定
+## Code conventions
 
-- 中文注释与中文 docstring 是这个项目既有的风格，保持即可；标识符一律英文。
-- 每个模块顶层写一句职责说明，复杂逻辑优先拆函数，不要堆长表达式。
-- 不在 `python -c` / `py -3 -c` 里跑多行脚本；临时脚本写成文件再执行。
-- 不修改 `site-packages/agentscope` 的源码，也不把框架源码复制进项目。
-- 文件操作优先专用工具，不要用 shell 命令替代读写。
+- Comments and module docstrings in this codebase are mostly Chinese. That is the existing
+  style; English is fine in new modules, but stay consistent within a file.
+- Every module opens with a one-line statement of its responsibility. Prefer splitting
+  functions over long expressions.
+- Do not run multi-line Python through `python -c` / `py -3 -c`; write a temporary file and
+  execute it instead.
+- Do not modify `site-packages/agentscope`, and do not copy framework sources into the project.
+- Prefer dedicated file tools over shell redirects for reading and writing files.
 
-## 验证改动
+## Verifying changes
 
-仓库不包含测试用例（由作者本地维护），所以每个 PR 需要在描述里写清验证方式：
+The repository does not ship test suites (they are maintained locally by the author), so every
+pull request must describe how it was verified:
 
 ```powershell
-python -m compileall -q alex termui     # 语法与导入层面自检
-python -m alex.tui                      # 手动过一遍受影响的功能
+python -m compileall -q alex termui     # syntax and import-level check
+python -m alex.tui                      # manually exercise the affected feature
 ```
 
-- 修 bug 请在 PR 里给出最小复现步骤：输入了什么、期望什么、实际什么。
-- 涉及会话、权限、记忆、快照的改动，请说明状态迁移是否会影响已有 `data/` 数据。
-- 涉及 TUI 的改动，请附终端尺寸与操作系统（Windows Terminal / ConPTY 差异较大）。
+- For bug fixes, give the minimal reproduction: input, expected, actual.
+- For changes to sessions, permissions, memory or snapshots, explain whether state migration
+  affects existing `data/`.
+- For TUI changes, include terminal size and OS (Windows Terminal / ConPTY behave differently).
 
-## 提交信息
+## Commit messages
 
-沿用 Conventional Commits 前缀 + 中文描述，一行说清做了什么：
+Use Conventional Commits prefixes with a short imperative English subject:
 
 ```
-feat: 支持 /queue 任务中断后续跑
-fix: 修复压缩后 LESSONS 未注入的问题
-refactor: 拆分 UI 卡片层
-chore: 升级 agentscope 到 2.0.12
-docs: 补充 MCP 配置示例
+feat: add resume support for queued tasks
+fix: inject LESSONS after context compaction
+refactor: split the UI card layer
+chore: bump agentscope to 2.0.12
+docs: document MCP configuration
 ```
 
-一次提交做一件事。格式化、重命名的噪声改动单独放一个 `chore:` / `refactor:`。
+One commit does one thing. Formatting-only or rename-only noise belongs in its own
+`chore:` / `refactor:` commit.
 
-## Pull Request
+## Pull requests
 
-1. 从 `main` 拉分支，命名 `feat/xxx`、`fix/xxx`。
-2. PR 描述里写：解决了什么、怎么验证的、有没有兼容性影响（配置字段、数据目录、命令行为）。
-3. 合并前需要在 Windows 上至少跑通一次启动，并手动验证受影响的功能。
-4. 改动用户可见行为时，同步更新 `README.md` 与 `skills/alexcode/SKILL.md`。
-5. 改动 `config/config.json` 字段时，保证老配置文件缺字段仍能启动。
+1. Branch from `main`, named `feat/xxx` or `fix/xxx`.
+2. Describe what changed, how you verified it, and any compatibility impact (config fields,
+   data directories, command behaviour).
+3. Launch the app on Windows at least once and manually check the affected feature before merging.
+4. Update `README.md` and `skills/alexcode/SKILL.md` when user-visible behaviour changes.
+5. When changing `config/config.json` fields, keep old config files working without those fields.
 
-## 新增技能或规则
+## Adding skills or rules
 
-本仓库只保留 `skills/alexcode` 一个内置技能。你自己的技能与规则写在本地即可，已被
-`.gitignore` 排除，不会进入提交：
+This repository ships exactly one bundled skill, `skills/alexcode`. Your own skills and rules
+stay local and are excluded by `.gitignore`, so they never end up in a commit:
 
-- `skills/<name>/SKILL.md`：frontmatter 必须有 `name` 与 `description`，`name` 与目录名一致。
-- `rules/<topic>.md`：纯 Markdown、无 frontmatter、一条规则一个文件。
-- 技能里不要写死本机路径、用户名或密钥。
-- 确实需要把某个技能开源时，先在 issue 里说明用途与来源，再单独提 PR；第三方技能必须附带
-  它的 `LICENSE`。
+- `skills/<name>/SKILL.md`: the frontmatter must contain `name` and `description`, and `name`
+  must match the directory.
+- `rules/<topic>.md`: plain Markdown, no frontmatter, one rule per file.
+- Never hardcode machine paths, usernames or secrets inside a skill.
+- If a skill really should be published, open an issue first explaining its purpose and
+  provenance, then send a separate PR; bundled third-party skills must include their `LICENSE`.
 
-## 不要提交
+## Do not commit
 
-`__pycache__`、`.pytest_cache`、`.venv`、`data/`、`agent_workspace/`、`design/`、
-`tests/`、个人技能与规则、`config/mcp_servers.json`、任何 `.env`。
-`.gitignore` 已覆盖这些，`git status` 里出现它们请先查原因。
+`__pycache__`, `.pytest_cache`, `.venv`, `data/`, `agent_workspace/`, `design/`, `tests/`,
+personal skills and rules, `config/mcp_servers.json`, or any `.env`.
+`.gitignore` covers all of these; if something shows up in `git status`, find out why first.
 
-## 行为准则
+## Code of conduct
 
-参与本项目即表示同意遵守 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)。
-安全问题请走私密渠道，见 [SECURITY.md](SECURITY.md)。
+By participating you agree to follow [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
+Report security issues privately, see [SECURITY.md](SECURITY.md).

@@ -1,28 +1,34 @@
-# 行为准则
+# Code of Conduct
 
-本项目希望保持一个可以直接说话、不用提防的技术空间。下面的约定适用于 issue、
-Pull Request、讨论区以及任何以项目名义进行的交流。
+This project aims to be a technical space where people can speak plainly without watching
+their back. The rules below apply to issues, pull requests, discussions, and any communication
+made on behalf of the project.
 
-## 我们鼓励
+## We encourage
 
-- 就事论事地指出问题：说清「哪一步、什么现象、期望是什么」。
-- 对代码、设计、文档提出反对意见，可以尖锐，但要指向工作本身。
-- 承认不知道、承认自己错了，这在这个项目里没有任何成本。
-- 帮助新人定位问题，哪怕只是指出「先看哪个文件」。
+- Pointing out problems concretely: which step, what happened, what you expected.
+- Disagreeing about code, design or documentation. Be sharp, but aim at the work.
+- Admitting you do not know something or that you were wrong. That costs nothing here.
+- Helping newcomers locate a problem, even if it is just "look at this file first".
 
-## 我们不接受
+## We do not accept
 
-- 人身攻击、羞辱、嘲讽，以及针对性别、地域、民族、宗教、疾病、残障、性取向的贬损。
-- 骚扰：反复纠缠、私信轰炸、未经同意公开他人私人信息。
-- 政治动员、地域攻击、与项目无关的引战。
-- 把别人的私有代码、密钥、对话记录贴到公开区域。
+- Personal attacks, insults, mockery, or disparagement based on gender, region, ethnicity,
+  religion, disease, disability or sexual orientation.
+- Harassment: repeated pestering, message bombing, publishing someone's private information
+  without consent.
+- Political campaigning, regional flame wars, or bait unrelated to the project.
+- Posting other people's private code, credentials or conversation logs in public areas.
 
-## 执行
+## Enforcement
 
-- 违规内容会被直接删除或关闭，不逐一辩论。
-- 屡次违规或严重违规（骚扰、泄露隐私、发布密钥）会被永久移出协作。
-- 你认为某条处理不公，可以邮件 `chasuperae1@gmail.com` 说明，会重新看一遍。
+- Violating content is removed or closed directly, without debating each case.
+- Repeated or severe violations (harassment, privacy leaks, publishing credentials) lead to
+  permanent removal from collaboration.
+- If you believe a decision was unfair, email `chasuperae1@gmail.com` with the details and it
+  will be reviewed again.
 
-## 适用范围
+## Scope
 
-本准则参考 Contributor Covenant 2.1 的精神，适用于项目仓库、issue、PR 与以项目名义的公开交流。
+This code follows the spirit of Contributor Covenant 2.1 and applies to the repository,
+issues, pull requests, and public communication made on behalf of the project.

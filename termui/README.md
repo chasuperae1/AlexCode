@@ -1,152 +1,171 @@
 # termui
 
-Claude Code 风格的终端 UI 组件库。基于 [Textual](https://textual.textualize.io/) 构建，提供虚拟化列表、多选框、输入框、进度条、层级菜单、状态面板六类核心组件，以及可切换的主题系统。
+A Claude Code–style terminal UI widget library built on [Textual](https://textual.textualize.io/):
+virtualized lists, checkbox groups, prompt inputs, progress bars, hierarchical menus, status
+panels, plus a switchable theme system.
 
-## 特性
+## Features
 
-- **流畅渲染**：列表采用虚拟化绘制（`ScrollView` + `render_line`），10 万条目下单帧渲染约 1ms，光标移动与滚动使用缓动动画
-- **键盘优先**：全部组件支持方向键导航、快捷键操作，无需鼠标
-- **响应式布局**：窗口宽度变化时自动在左右分栏 / 上下堆叠之间切换
-- **主题系统**：内置 3 套主题，`Ctrl+T` 实时切换，组件样式全部引用主题变量
-- **可扩展**：组件样式类（COMPONENT_CLASSES）+ `DEFAULT_CSS` 双层覆盖机制
-- **可测试**：15 项自动化测试，基于 Textual Pilot 无头驱动
+- **Smooth rendering** — lists are virtualized (`ScrollView` + `render_line`); 100k entries
+  render in about 1 ms per frame, with eased animation for cursor movement and scrolling.
+- **Keyboard first** — every widget supports arrow-key navigation and shortcuts, no mouse needed.
+- **Responsive** — switches between side-by-side and stacked layouts as the window width changes.
+- **Theme system** — three built-in themes, `Ctrl+T` switches live, all widget styles reference
+  theme variables.
+- **Extensible** — two-layer override: `COMPONENT_CLASSES` plus `DEFAULT_CSS`.
+- **Testable** — 15 automated cases driven headlessly through the Textual Pilot (maintained locally).
 
-## 安装与运行
+## Install and run
 
 ```bash
 pip install textual>=8.2
 
-# 运行演示
+# run the demo
 python -m termui.demo
-# 或
+# or
 python -m termui
 ```
 
-演示程序快捷键：
+Demo key bindings:
 
-| 按键 | 作用 |
+| Key | Action |
 |---|---|
-| `↑` `↓` | 列表/菜单/多选框内移动 |
-| `→` `←` | 展开 / 折叠层级菜单 |
-| `空格` | 勾选/取消勾选；在进度条上暂停动画 |
-| `A` | 多选框全选 / 全不选 |
-| `Enter` | 确认选中 / 激活菜单项 / 提交输入 |
-| `Tab` | 在组件间切换焦点 |
-| `Ctrl+T` | 切换主题 |
-| `Ctrl+R` | 进度条随机跳转 |
-| `F1` | 显示快捷键帮助 |
-| `Ctrl+Q` | 退出 |
+| `↑` `↓` | Move within a list, menu or checkbox group |
+| `→` `←` | Expand / collapse a hierarchy node |
+| `Space` | Toggle a checkbox; pause the progress animation |
+| `A` | Select all / none in a checkbox group |
+| `Enter` | Confirm selection, activate a menu item, submit input |
+| `Tab` | Move focus between widgets |
+| `Ctrl+T` | Switch theme |
+| `Ctrl+R` | Jump the progress bar to a random value |
+| `F1` | Show the shortcut help |
+| `Ctrl+Q` | Quit |
 
-输入框内支持 `↑`/`↓` 翻历史、`Ctrl+L` 清空；输入 `/theme`、`/expand`、`/collapse`、`/clear`、`/help` 可直接控制演示界面。
+Inside the prompt input: `↑`/`↓` walk the history, `Ctrl+L` clears it, and `/theme`,
+`/expand`, `/collapse`, `/clear`, `/help` control the demo directly.
 
-## 接入 Alex
+## Integrating with AlexCode
 
-项目内的 `alex/tui.py` 是完整的接入示例：`python -m alex.tui` 启动对话界面。
+`alex/tui.py` in this repository is a full integration example: `python -m alex.tui` starts
+the chat UI.
 
-- 聊天区：`ChatLog`（滚动容器 + 增量挂载控件），AI 回复用 `Markdown` 控件渲染，用户消息带背景气泡（`.user-bubble`），流式时只更新当前消息控件（50ms 节流），滚动条已隐藏
-- 消息结构：一轮对话 = 用户气泡 → 可折叠调试组（思考/工具日志，默认收起，`Ctrl+O` 展开）→ Markdown 回答；回答容器延迟到首个文本 delta 才挂载，避免出现在调试组上方
-- 元信息行：当前模型 + 上下文 token（已用/总量、百分比、距压缩阈值），由 `Model.count_tokens` 实测
-- 命令：`/model [名称]` 切换模型（读 `config/config.json` 的 `model_profiles` 并持久化）、`/reload`、`/clear`、`/theme`、`/tasks`、`/exit`
-- 事件流：直接消费 AgentScope 原生事件——`ThinkingBlock*` 展示思考过程、`ToolCallStart/ToolResultEnd` 展示工具与耗时、`mcp__server__tool` 识别为 MCP 调用、`Skill` 工具展示读取的技能名；启动时列出已加载的规则与技能
-- 任务摘要：单行显示「Tasks 2/3 · running: xxx」，无任务时自动隐藏
-- 底部：`PromptInput` 输入 + 元信息行（模型/上下文）；当前动作显示在思考/工具折叠组的标题上，展开才看详细内容
-- 只有 `ReplyEndEvent` 之后才保存会话，避免中断产生残缺上下文
+- **Chat area** — `ChatLog` (scroll container plus incremental widget mounting); assistant
+  replies render through a `Markdown` widget, user messages get a background bubble
+  (`.user-bubble`), streaming updates only the current widget (50 ms throttle), scrollbar hidden.
+- **Message structure** — one exchange = user bubble → collapsible debug group (thinking and
+  tool logs, collapsed by default, `Ctrl+O` expands) → Markdown answer; the answer container is
+  mounted on the first text delta so it never appears above the debug group.
+- **Meta line** — current model plus context tokens (used / total, percentage, distance to the
+  compaction threshold), measured through `Model.count_tokens`.
+- **Commands** — `/model [name]` switches models (reads `model_profiles` from
+  `config/config.json` and persists the choice), `/reload`, `/clear`, `/theme`, `/tasks`, `/exit`.
+- **Event stream** — consumes AgentScope's native events directly: `ThinkingBlock*` shows
+  reasoning, `ToolCallStart/ToolResultEnd` shows tools and timings, `mcp__server__tool` is
+  recognized as an MCP call, the `Skill` tool shows the skill being read; loaded rules and
+  skills are listed at startup.
+- **Task summary** — one line, `Tasks 2/3 · running: xxx`, hidden when no task is active.
+- **Bottom** — `PromptInput` plus a meta line (model / context); the current action appears in
+  the debug group header and only expands on demand.
+- **Persistence** — the session is written only after `ReplyEndEvent`, so an interruption never
+  leaves a truncated context.
 
-## 组件
+## Widgets
 
-### ScrollList 可滚动列表
+### ScrollList — scrollable list
 
 ```python
 from termui import ScrollList, ListItem
 
 scroll_list = ScrollList([
-    ListItem("构建项目", "编译 + 打包", value="build"),
-    ListItem("部署", "暂未配置", value="deploy", disabled=True),
+    ListItem("Build", "compile + package", value="build"),
+    ListItem("Deploy", "not configured", value="deploy", disabled=True),
 ])
 ```
 
-| 成员 | 说明 |
+| Member | Purpose |
 |---|---|
-| `items` / `current` | 条目列表 / 当前光标条目 |
-| `set_items(items)` | 替换数据并重置光标 |
-| `cursor_index` | 当前光标索引 |
-| `ScrollList.Highlighted` | 光标移动消息 |
-| `ScrollList.Selected` | 回车选中消息 |
+| `items` / `current` | Item list / item under the cursor |
+| `set_items(items)` | Replace data and reset the cursor |
+| `cursor_index` | Current cursor index |
+| `ScrollList.Highlighted` | Cursor moved message |
+| `ScrollList.Selected` | Enter pressed message |
 
-### CheckboxGroup 多选框
+### CheckboxGroup — multi-select
 
 ```python
 from termui import CheckboxGroup
 
 group = CheckboxGroup(
-    ["打包产物", ("上传镜像", "upload"), ("通知团队", "notify", True)],
-    title="附加步骤",
+    ["package artifacts", ("push image", "upload"), ("notify team", "notify", True)],
+    title="Extra steps",
 )
 ```
 
-选项支持三种写法：`"文本"`、`(文本, 值)`、`(文本, 值, 是否禁用)`。消息：`SelectionChanged`、`Submitted`。
+Options accept three forms: `"text"`, `(text, value)`, `(text, value, disabled)`. Messages:
+`SelectionChanged`, `Submitted`.
 
-### PromptInput 输入框
+### PromptInput — text input
 
 ```python
 from termui import PromptInput
 
 prompt = PromptInput(
-    placeholder="输入命令",
-    validator=lambda value: "不能为空" if not value else None,
-    history=["上一条命令"],
+    placeholder="type a command",
+    validator=lambda value: "cannot be empty" if not value else None,
+    history=["previous command"],
 )
 ```
 
-校验失败时自动标红并发出 `Rejected(value, reason)`；通过后发出 `Submitted(value)` 并写入历史。
+A failed validation highlights the field and emits `Rejected(value, reason)`; success emits
+`Submitted(value)` and appends to history.
 
-### ProgressBar 进度条
+### ProgressBar
 
 ```python
 from termui import ProgressBar
 
-bar = ProgressBar(label="构建进度")
-bar.advance_to(65)          # 平滑动画到 65%
-bar.indeterminate = True    # 不确定进度模式
+bar = ProgressBar(label="Build progress")
+bar.advance_to(65)          # animate smoothly to 65%
+bar.indeterminate = True    # indeterminate mode
 ```
 
-### HierarchyMenu 层级菜单
+### HierarchyMenu
 
 ```python
 from termui import HierarchyMenu, MenuNode
 
 menu = HierarchyMenu([
-    MenuNode("文件", expanded=True, children=[
-        MenuNode("新建", value="Ctrl+N"),
-        MenuNode("最近使用", children=[MenuNode("main.py")]),
+    MenuNode("File", expanded=True, children=[
+        MenuNode("New", value="Ctrl+N"),
+        MenuNode("Recent", children=[MenuNode("main.py")]),
     ]),
 ])
 ```
 
-`Activated(path, node)` 在叶子节点回车时触发，`path` 是完整层级路径。
+`Activated(path, node)` fires when Enter is pressed on a leaf; `path` is the full hierarchy path.
 
-### StatusPanel 状态面板
+### StatusPanel
 
 ```python
 from termui import StatusPanel
 
-status = StatusPanel(text="就绪")
-status.notify("保存成功", level="success", timeout=3)
-status.busy = True   # 显示旋转指示器
+status = StatusPanel(text="ready")
+status.notify("saved", level="success", timeout=3)
+status.busy = True   # show the spinner
 ```
 
-级别：`info` / `success` / `warning` / `error`，颜色取自主题。
+Levels: `info` / `success` / `warning` / `error`; colours come from the theme.
 
-## 主题
+## Themes
 
 ```python
 from termui import TermUIApp, ThemeSpec, THEMES, register_themes
 
-# 方式一：使用内置主题（slate / slate-light / high-contrast）
+# option 1: built-in themes (slate / slate-light / high-contrast)
 class MyApp(TermUIApp):
     ...
 
-# 方式二：自定义
+# option 2: custom
 THEMES["mine"] = ThemeSpec(
     name="mine",
     primary="#7aa2f7", secondary="#565f89", accent="#bb9af7",
@@ -156,31 +175,35 @@ THEMES["mine"] = ThemeSpec(
 )
 ```
 
-组件 CSS 只引用 `$primary` / `$surface` / `$panel` / `$text-muted` 等主题变量，所以切换 `app.theme` 后所有已挂载组件立即重新着色。
+Widget CSS references only theme variables such as `$primary` / `$surface` / `$panel` /
+`$text-muted`, so switching `app.theme` recolours every mounted widget immediately.
 
-## 架构
+## Architecture
 
 ```
 termui/
-├── theme.py                 # ThemeSpec + 主题注册/切换
-├── app.py                   # TermUIApp 基类（注册主题、Ctrl+T）
-├── demo.py                  # 演示程序
+├── theme.py                 # ThemeSpec + theme registration and switching
+├── app.py                   # TermUIApp base class (registers themes, Ctrl+T)
+├── demo.py                  # demo application
 └── widgets/
-    ├── scroll_list.py       # 虚拟化列表
-    ├── checkbox_group.py    # 多选框
-    ├── prompt_input.py      # 输入框
-    ├── progress.py          # 进度条
-    ├── hierarchy_menu.py    # 层级菜单
-    └── status_panel.py      # 状态面板
+    ├── scroll_list.py       # virtualized list
+    ├── checkbox_group.py    # checkbox group
+    ├── prompt_input.py      # prompt input
+    ├── progress.py          # progress bar
+    ├── hierarchy_menu.py    # hierarchy menu
+    └── status_panel.py      # status panel
 ```
 
-分层：主题层（设计变量）→ 组件层（状态 + 键盘 + 消息）→ 应用层（组装与交互）。组件之间不直接依赖，统一通过 Textual 消息通信。
+Layering: theme (design variables) → widgets (state + keyboard + messages) → application
+(assembly and interaction). Widgets never depend on each other; they communicate through
+Textual messages.
 
-## 自定义与扩展
+## Customising and extending
 
-1. **改单个组件外观**：继承后覆盖 `DEFAULT_CSS`
-2. **细粒度改色**：覆盖 `COMPONENT_CLASSES` 对应的样式类
-3. **新增组件**：实现 `render()`（普通组件）或 `render_line()`（滚动类组件），状态变化时 `refresh()`
+1. **Restyle one widget** — subclass it and override `DEFAULT_CSS`.
+2. **Fine-grained colours** — override the `COMPONENT_CLASSES` style classes.
+3. **Add a widget** — implement `render()` (plain widgets) or `render_line()` (scrollable ones),
+   and call `refresh()` when state changes.
 
 ```python
 from termui import ScrollList
@@ -191,35 +214,38 @@ class CompactList(ScrollList):
     """
 ```
 
-## 验证范围
+## What is verified
 
-用例由作者本地维护，不随仓库发布。当前覆盖的行为：
+Cases are maintained locally by the author and not published. Current coverage:
 
-- 列表导航 / 选中 / 禁用项、多选全选
-- 输入校验与历史记录
-- 进度动画与键盘微调
-- 菜单展开折叠与激活
-- 状态提示自动消失、主题循环、窄屏响应式
-- 10 万条目渲染性能
+- list navigation / selection / disabled items, select-all in checkbox groups
+- input validation and history
+- progress animation and keyboard nudging
+- menu expand / collapse / activation
+- auto-dismissing status messages, theme cycling, narrow-width responsiveness
+- rendering performance at 100k entries
 
-改动组件后请手动过一遍上述交互，并在 PR 里写明终端尺寸与系统。
+After changing a widget, walk through the interactions above manually and note terminal size
+and OS in the pull request.
 
-## 性能
+## Performance
 
-- 列表只渲染可视行，`virtual_size` 与实际条目数解耦
-- 本机实测：10 万条目、30 行可视区域，单帧渲染约 **1.08ms**（预算 16.7ms）
-- 动画交给 Textual animator，无需自建帧循环
-- 状态面板的旋转指示器仅在 `busy` 期间以 15Hz 刷新，空闲时零开销
+- Only visible rows are rendered; `virtual_size` is decoupled from the item count.
+- Measured locally: 100k entries, 30 visible rows, about **1.08 ms** per frame (16.7 ms budget).
+- Animation is delegated to the Textual animator; no custom frame loop.
+- The status panel spinner refreshes at 15 Hz only while `busy`, with zero cost when idle.
 
-## 终端兼容性
+## Terminal compatibility
 
-Textual 负责底层终端能力（备用屏幕、鼠标、真彩色、resize），组件层不直接输出 ANSI 序列。
+Textual handles terminal capabilities (alternate screen, mouse, true colour, resize); widgets
+never emit raw ANSI sequences.
 
-| 终端 | 状态 |
+| Terminal | Status |
 |---|---|
-| Windows Terminal | 已在 Windows 11 实测（演示程序 + 全部测试通过） |
-| VS Code 集成终端 | 已在 Windows 11 实测 |
-| iTerm2 / macOS Terminal | 依赖 Textual 的跨平台渲染，未在本机（Windows）实测 |
-| 无真彩色终端 | Textual 自动降级为 256 色，主题仍可用 |
+| Windows Terminal | tested on Windows 11 (demo + full suite) |
+| VS Code integrated terminal | tested on Windows 11 |
+| iTerm2 / macOS Terminal | relies on Textual's cross-platform renderer; not tested on this Windows machine |
+| Terminals without true colour | Textual falls back to 256 colours; themes still work |
 
-已知限制：Windows 传统 `conhost` 在窗口缩放时偶有重绘延迟，建议使用 Windows Terminal。
+Known limitation: legacy Windows `conhost` occasionally lags on resize; Windows Terminal is
+recommended.

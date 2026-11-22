@@ -1,5 +1,5 @@
 blank_issues_enabled: false
 contact_links:
-  - name: 安全漏洞（请勿开公开 issue）
+  - name: Security vulnerability (do not open a public issue)
     url: https://github.com/chasuperae1/AlexCode/security/advisories/new
-    about: 权限绕过、密钥泄露、路径越界等问题请走私密上报
+    about: Permission bypass, credential leaks and path escapes should be reported privately

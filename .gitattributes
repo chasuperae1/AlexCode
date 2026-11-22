@@ -1,12 +1,12 @@
-# 默认按文本处理，换行交给各平台自行检出
+# Treat everything as text by default; line endings are handled per platform
 * text=auto
 
-# Windows 脚本保持 CRLF，否则双击运行与 cmd 解析都会出问题
+# Keep Windows scripts CRLF, otherwise double-click launching and cmd parsing break
 *.bat  text eol=crlf
 *.cmd  text eol=crlf
 *.ps1  text eol=crlf
 
-# 二进制与归档，避免被当成文本做 diff
+# Binary and archive formats, never diff them as text
 *.png  binary
 *.jpg  binary
 *.jpeg binary
