@@ -3,6 +3,3 @@ contact_links:
   - name: 安全漏洞（请勿开公开 issue）
     url: https://github.com/chasuperae1/AlexCode/security/advisories/new
     about: 权限绕过、密钥泄露、路径越界等问题请走私密上报
-  - name: 使用问题与讨论
-    url: https://github.com/chasuperae1/AlexCode/discussions
-    about: 配置、模型接入、MCP 使用等非缺陷类问题
