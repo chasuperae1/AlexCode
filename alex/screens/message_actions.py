@@ -5,16 +5,17 @@ from __future__ import annotations
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
-from textual.screen import ModalScreen
 from textual.widgets import OptionList, Static
 from textual.widgets.option_list import Option
+
+from alex.screens.modal_base import OPTION_HINT, OptionListModal
 
 REVERT = "revert"
 COPY = "copy"
 CANCEL = "cancel"
 
 
-class MessageActionsScreen(ModalScreen[str | None]):
+class MessageActionsScreen(OptionListModal):
     """用户消息操作：回到这条消息发送之前，或复制内容。"""
 
     BINDINGS = [
@@ -77,10 +78,7 @@ class MessageActionsScreen(ModalScreen[str | None]):
                     id="message-actions-note",
                 )
             yield OptionList(id="message-actions-list")
-            yield Static(
-                "↑/↓ move · Enter select · Esc cancel",
-                id="message-actions-hint",
-            )
+            yield Static(OPTION_HINT, id="message-actions-hint")
 
     def on_mount(self) -> None:
         options = self.query_one("#message-actions-list", OptionList)
@@ -90,14 +88,7 @@ class MessageActionsScreen(ModalScreen[str | None]):
             )
         options.add_option(Option("Copy message", id=COPY))
         options.add_option(Option("Cancel", id=CANCEL))
-        options.highlighted = 0
-        options.focus()
-
-    def on_option_list_option_selected(
-        self,
-        event: OptionList.OptionSelected,
-    ) -> None:
-        self.dismiss(str(event.option.id))
+        self._focus_list(options)
 
     def action_copy(self) -> None:
         self.dismiss(COPY)

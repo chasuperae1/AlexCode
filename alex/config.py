@@ -70,7 +70,7 @@ def lock_skill_files() -> None:
                 continue
             try:
                 os.chmod(path, stat.S_IREAD)
-            except OSError:
+            except OSError:  # 只读标记失败不阻止启动（部分文件系统不支持）
                 pass
 
 

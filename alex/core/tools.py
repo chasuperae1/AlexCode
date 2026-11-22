@@ -6,31 +6,18 @@
 
 from __future__ import annotations
 
-import asyncio
 import os
 import re
-import signal
-import subprocess
-import urllib.parse
-import urllib.request
-import xml.etree.ElementTree as ET
-from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from agentscope.message import TextBlock
 from agentscope.permission import PermissionBehavior, PermissionDecision
-from agentscope.tool import (
-    ExecResult,
-    LocalBackend,
-    ToolBase,
-    ToolChunk,
-)
+from agentscope.tool import ToolBase, ToolChunk
 from agentscope.tool._response import ToolResultState
 
-from alex.config import locked_skill_dirs
-from alex.core.permissions import is_dangerous_command
-
-_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AlexAgent/1.0"
+from alex.core.permissions import is_dangerous_command, is_locked_skill_path  # noqa: F401
+from alex.core.tool_chunks import error_chunk
+from alex.core.tools_web import TrackedLocalBackend, WebSearch  # re-exported
 
 # 命中这些写法就视为“要改动文件”，配合内置技能路径做拒绝判断
 _WRITE_INTENT = re.compile(
@@ -39,24 +26,6 @@ _WRITE_INTENT = re.compile(
     r"|\bset-content\b|\bout-file\b|\bremove-item\b|\bnew-item\b)",
     re.IGNORECASE,
 )
-
-
-def is_locked_skill_path(path: str) -> bool:
-    """路径是否位于内置只读技能目录内。"""
-    try:
-        target = Path(path).expanduser().resolve()
-    except (OSError, RuntimeError):
-        return False
-    for folder in locked_skill_dirs():
-        try:
-            target.relative_to(folder.resolve())
-            return True
-        except (OSError, RuntimeError, ValueError):
-            continue
-    return False
-
-
-from alex.core.tools_web import TrackedLocalBackend, WebSearch
 
 
 class Cmd(ToolBase):
@@ -276,9 +245,9 @@ skip, continue with the most reasonable default and state the assumption.
         question = str(question or "").strip()
         normalized = self._normalize(options)
         if not question:
-            return self._error("`question` is required.")
+            return error_chunk("`question` is required.")
         if len(normalized) < 2:
-            return self._error("Provide at least 2 options.")
+            return error_chunk("Provide at least 2 options.")
 
         if self._ask is None:
             return ToolChunk(
@@ -356,11 +325,4 @@ skip, continue with the most reasonable default and state the assumption.
                 + "\n".join(f"- {item}" for item in images)
             )
         return text
-
-    @staticmethod
-    def _error(message: str) -> ToolChunk:
-        return ToolChunk(
-            content=[TextBlock(text=message)],
-            state=ToolResultState.ERROR,
-        )
 

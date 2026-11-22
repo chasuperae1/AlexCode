@@ -3,46 +3,19 @@
 from __future__ import annotations
 
 import asyncio
-import json
-import re
-import time
-import uuid
-from copy import deepcopy
-from dataclasses import asdict
-from datetime import datetime
-from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
-from pydantic import BaseModel, Field
 
 from alex.config import (
     CONFIG,
-    LOCKED_SKILLS,
-    ROOT,
-    lock_skill_files,
-    project_path,
-    reload_config,
-    save_config,
-    workspace_path,
 )
-from alex.core.images import build_user_message, display_text
-from alex.core import reasoning
-from alex.core.snapshots import Checkpoint, SnapshotError, SnapshotStore, now_label
 
 from alex.session.clarify_rules import needs_clarification
 from alex.session.common import (
-    ASSISTANT,
-    BOOT_STAGES,
-    DEFAULT_WELCOME,
-    Emit,
     GOAL_INTERVIEW_PROMPT,
-    GOAL_RESTATEMENT_PROMPT,
     GoalInterview,
-    GoalRestatement,
-    READONLY_TOOLS,
     SessionError,
     USER,
-    _format_tokens,
 )
 
 from alex.session.goal_pipeline import GoalPipelineMixin
@@ -104,7 +77,7 @@ class GoalMixin(GoalPipelineMixin):
         self.emit("goal_card", self._goal_card_view())
         self._goal_confirming = False
         self._phase = "understanding_goal"
-        self._progress("Goal · 理解需求中")
+        self._progress("Goal · Understanding request")
         self._emit_status()
         self._goal_task = asyncio.create_task(self._goal_understand(text))
         return {"understanding": True}
@@ -125,7 +98,7 @@ class GoalMixin(GoalPipelineMixin):
                 state["questions"] = total
                 state["answered"] = index - 1
                 state["understanding_live"] = False
-                self._progress(f"Goal · 补充条件 {index}/{total}", "warn")
+                self._progress(f"Goal · Additional details {index}/{total}", "warn")
                 self._update_goal_card()
                 answer = await self._ask_user(
                     {
@@ -137,7 +110,7 @@ class GoalMixin(GoalPipelineMixin):
                 )
                 brief.append(
                     {
-                        "key": str(item.get("key") or "补充"),
+                        "key": str(item.get("key") or "Details"),
                         "value": self._clarify_value(answer),
                     }
                 )
@@ -145,9 +118,9 @@ class GoalMixin(GoalPipelineMixin):
                 state["answered"] = index
                 self._update_goal_card()
                 self._progress(
-                    f"Goal · 补充条件 {min(index + 1, total)}/{total}"
+                    f"Goal · Additional details {min(index + 1, total)}/{total}"
                     if index < total
-                    else "Goal · 等待确认",
+                    else "Goal · Awaiting confirmation",
                     "warn",
                 )
             if self._goal_state is None:

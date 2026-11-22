@@ -2,43 +2,21 @@
 
 from __future__ import annotations
 
-import asyncio
-import json
-import re
-import time
-import uuid
-from copy import deepcopy
 from dataclasses import asdict
-from datetime import datetime
-from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
-from pydantic import BaseModel, Field
 
 from alex.config import (
     CONFIG,
-    LOCKED_SKILLS,
-    ROOT,
-    lock_skill_files,
     project_path,
-    reload_config,
-    save_config,
     workspace_path,
 )
-from alex.core.images import build_user_message, display_text
 from alex.core import reasoning
-from alex.core.snapshots import Checkpoint, SnapshotError, SnapshotStore, now_label
+from alex.core.snapshots import SnapshotError
 
 from alex.session.common import (
     ASSISTANT,
-    BOOT_STAGES,
-    DEFAULT_WELCOME,
-    Emit,
-    GOAL_RESTATEMENT_PROMPT,
-    GoalRestatement,
-    READONLY_TOOLS,
     SessionError,
-    USER,
     _format_tokens,
 )
 
@@ -95,7 +73,7 @@ class HistoryMixin:
                 ratio=self.agent.context_config.trigger_ratio,
                 available=True,
             )
-        except Exception:
+        except Exception:  # 统计失败时退回粗算值
             pass
         return data
 
@@ -201,6 +179,7 @@ class HistoryMixin:
         path = project_path("session_file")
         if path.is_file():
             path.unlink()
+        self._clear_history_file()
         self._pending_ask = None
         self._ask_future = None
         self._clear_pending_ask()
@@ -225,7 +204,10 @@ class HistoryMixin:
             "cached": 0,
             "last": 0,
         }
-        self.emit("history_reset", {"history": self._history_payload()})
+        self.emit(
+            "history_reset",
+            {"history": self._history_payload(), "checkpoints": []},
+        )
         self.emit("checkpoints", {"checkpoints": []})
         self._refresh_tasks()
         await self._update_meta()
@@ -296,7 +278,13 @@ class HistoryMixin:
         self._revert["index"] = index
         self._revert["prompt"] = checkpoint.prompt
         await self._rebuild_agent()
-        self.emit("history_reset", {"history": self._history_payload()})
+        self.emit(
+            "history_reset",
+            {
+                "history": self._history_payload(),
+                "checkpoints": [asdict(item) for item in self._checkpoints],
+            },
+        )
         self._refresh_tasks()
         await self._update_meta()
         return {"index": index, "files": len(files), "prompt": checkpoint.prompt}
@@ -320,7 +308,13 @@ class HistoryMixin:
         self.history = self._history_from_state(self.agent.state)
         self._revert = None
         await self._rebuild_agent()
-        self.emit("history_reset", {"history": self._history_payload()})
+        self.emit(
+            "history_reset",
+            {
+                "history": self._history_payload(),
+                "checkpoints": [asdict(item) for item in self._checkpoints],
+            },
+        )
         self._refresh_tasks()
         await self._update_meta()
         return {"files": len(files)}

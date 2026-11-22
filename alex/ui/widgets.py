@@ -6,16 +6,22 @@ import re
 
 from rich.style import Style
 from rich.text import Text
-from textual.app import ComposeResult
-from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual._wrap import compute_wrap_offsets
-from textual.widgets import RichLog, Static
+from textual.widgets import Static
 from termui import PromptInput as TermPromptInput
 
-from alex.screens.diff import diff_lines, diff_palette, parse_diff, render_diff
+from alex.core.formatting import format_tokens as _format_tokens  # noqa: F401
 from alex.core.snapshots import Checkpoint
-from alex.ui.constants import PROMPT_PLACEHOLDER, _IMAGE_TOKEN, _TDC_MAX_LINES
+from alex.ui.constants import _IMAGE_TOKEN
+
+
+def anchor_terminal_cursor(widget) -> None:
+    """把终端光标锚到控件真实位置，避免输入法候选窗跑偏。"""
+    try:
+        widget.app.cursor_position = widget.cursor_screen_offset
+    except Exception:
+        return
+    widget.refresh()
 
 
 class PromptInput(TermPromptInput):
@@ -56,6 +62,10 @@ class PromptInput(TermPromptInput):
     def on_resize(self) -> None:
         self._last_height = None  # 窗口大小变化时清缓存
         self._sync_height()
+
+    def on_focus(self, event) -> None:
+        # 首次聚焦时主动锚定终端光标，避免输入法候选窗先出现在左上角。
+        self.call_after_refresh(lambda: anchor_terminal_cursor(self))
 
     def action_paste(self) -> None:
         # TextArea.action_paste 是同步方法，异步逻辑放 worker 里跑
@@ -152,16 +162,6 @@ class ChangesSummary(Static):
         self.exchange_id = checkpoint.exchange_id
 
 
-
-
-def _format_tokens(value: int) -> str:
-    if value >= 1_000_000:
-        return f"{value / 1_000_000:.1f}m"
-    if value >= 1000:
-        return f"{value / 1000:.1f}k"
-    return str(value)
-
-
 def _changes_text(checkpoint: Checkpoint) -> str:
     count = len(checkpoint.files)
     label = f"{count} file{'s' if count != 1 else ''} changed"
@@ -173,4 +173,9 @@ def _changes_text(checkpoint: Checkpoint) -> str:
 def _changes_label(checkpoint: Checkpoint) -> Text:
     return Text(f"✎ {_changes_text(checkpoint)} · click to view diff")
 
-from alex.ui.diff_cards import InlineDiffCard, PermissionDiffCard, ToolDiffCard  # noqa: E402,F401
+from alex.ui.cards import (  # noqa: E402,F401
+    InlineDiffCard,
+    PermissionDiffCard,
+    ShellPermissionCard,
+    ToolDiffCard,
+)

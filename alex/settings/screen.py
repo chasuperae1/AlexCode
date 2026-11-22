@@ -2,30 +2,21 @@
 
 from __future__ import annotations
 
-from rich.text import Text
-from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.message import Message
+from textual.containers import VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Markdown, Select, Static
+from textual.widgets import Select, Static
 
-from alex.config import LOCKED_SKILLS
-
-from alex.settings.constants import (
-    MODE_OPTIONS,
-    SECTION_META,
-    _format_size,
-    _mode_value,
-    _short_tokens,
-)
+from alex.settings.constants import SECTION_META
+from alex.settings.data import SettingsData
 from alex.settings.memory import MemoryMixin
 from alex.settings.sections import SectionsMixin
 from alex.settings.style import SETTINGS_CSS
 from alex.settings.widgets import MemoryRow, ModeSwitch, StatusDot
 
-
 from alex.settings.layout import SettingsLayoutMixin
+
+
 class SettingsScreen(SettingsLayoutMixin, SectionsMixin, MemoryMixin, ModalScreen):
     """设置弹层：顶部分类导航，下方分类内容。"""
 
@@ -44,31 +35,22 @@ class SettingsScreen(SettingsLayoutMixin, SectionsMixin, MemoryMixin, ModalScree
 
     def __init__(
         self,
-        sections: list[tuple[str, str, str]],
+        data: SettingsData,
         *,
-        skills: list[tuple[str, str, bool]] | None = None,
-        rules: list[tuple[str, str, bool]] | None = None,
-        skill_details: dict[str, str] | None = None,
-        rule_details: dict[str, str] | None = None,
-        mcp_servers: list[tuple[str, str, bool]] | None = None,
-        mcp_tools: list[tuple[str, str, str, bool]] | None = None,
-        tokens: dict | None = None,
-        memory: dict | None = None,
-        display_mode: str = "developer",
         on_visibility_change=None,
         on_display_mode_change=None,
     ) -> None:
         super().__init__()
-        self._sections = sections or [("empty", "Settings", "No settings.")]
+        self._sections = data.sections or [("empty", "Settings", "No settings.")]
         self._bodies = {item[0]: item[2] for item in self._sections}
-        self._skills = list(skills or [])
-        self._rules = list(rules or [])
-        self._skill_details = dict(skill_details or {})
-        self._rule_details = dict(rule_details or {})
-        self._mcp_servers = list(mcp_servers or [])
-        self._mcp_tools = list(mcp_tools or [])
-        self._tokens = dict(tokens or {})
-        self._memory = dict(memory or {})
+        self._skills = list(data.skills)
+        self._rules = list(data.rules)
+        self._skill_details = dict(data.skill_details)
+        self._rule_details = dict(data.rule_details)
+        self._mcp_servers = list(data.mcp_servers)
+        self._mcp_tools = list(data.mcp_tools)
+        self._tokens = dict(data.tokens)
+        self._memory = dict(data.memory)
         self._bar_ratio = 0.0
         groups: dict[str, list[int]] = {}
         for index, (server, _name, _description, _enabled) in enumerate(
@@ -84,7 +66,7 @@ class SettingsScreen(SettingsLayoutMixin, SectionsMixin, MemoryMixin, ModalScree
         self._on_visibility_change = on_visibility_change
         self._on_display_mode_change = on_display_mode_change
         self._display_mode = (
-            "concise" if str(display_mode) == "concise" else "developer"
+            "concise" if str(data.display_mode) == "concise" else "developer"
         )
         self._active_index = 0
         self._dirty = False

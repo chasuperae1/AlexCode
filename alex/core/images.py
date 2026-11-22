@@ -6,10 +6,14 @@ import base64
 import mimetypes
 import re
 from pathlib import Path
+from typing import TYPE_CHECKING
 from urllib.parse import unquote, urlparse
 
+if TYPE_CHECKING:
+    from agentscope.message import UserMsg
+
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
-DEFAULT_IMAGE_PROMPT = "请描述这张图片。"
+DEFAULT_IMAGE_PROMPT = "Describe this image."
 
 _TOKEN = re.compile(r'"([^"]+)"|\'([^\']+)\'|(\S+)')
 _WINDOWS_DRIVE = re.compile(r"^/[A-Za-z]:")

@@ -3,83 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-import json
-import re
-import sys
 import time
-from pathlib import Path
 
-import frontmatter
-from rich.console import Console
-from rich.style import Style
 from rich.text import Text
-from textual._wrap import compute_wrap_offsets
-from textual import work
-from textual.app import ComposeResult
-from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.message import Message
-from textual.screen import ModalScreen
-from textual.widgets import Collapsible, Markdown, OptionList, RichLog, Static
-from textual.widgets.option_list import Option
+from textual.widgets import Static
 
-from termui import PromptInput as TermPromptInput, TermUIApp
-
-
-def _facade():
-    """运行时取 ``alex.tui``（避免循环 import，同时让测试打桩生效）。"""
-    from alex import tui as facade
-
-    return facade
-
-from alex.screens.ask_choice import AskChoice
-from alex.daemon.client import DaemonClient, LinkError, LocalLink, ensure_daemon, prewarm_daemon
-from alex.screens.confirm import ALLOW, ALWAYS, DENY, ConfirmScreen
-from alex.config import CONFIG, ROOT, reload_config, workspace_path
-from alex.screens.diff import DiffScreen, diff_lines, parse_diff, render_diff
-from alex.screens.dir_picker import DirectoryPicker
-from alex.core.images import grab_clipboard_image, split_images
-from alex.screens.message_actions import COPY, REVERT, MessageActionsScreen
-from alex.screens.permission import PermissionScreen
-from alex.screens.picker import PickerScreen
-from alex.settings import SettingsScreen
-from alex.core.snapshots import Checkpoint
-from alex.ui.themes import DEFAULT_THEME, THEMES, next_theme, theme_label, theme_name
-from alex.ui.boot import LoadingOverlay, _gradient_banner, _hex_rgb, _render_boot_panel
-from alex.ui.constants import (
-    ASSISTANT,
-    DEBUG_KINDS,
-    LOCAL_TOOLS,
-    PROMPT_PLACEHOLDER,
-    QUEUE_CARD_LIMIT,
-    UI_STATE_PATH,
-    USER,
-    _BOOT_BANNER,
-    _BOOT_LABELS,
-    _BOOT_ORDER,
-    _BOOT_SPINNER,
-    _BOX_END,
-    _BOX_MID,
-    _BOX_START,
-    _BOX_V,
-    _IMAGE_TOKEN,
-    _TDC_MAX_LINES,
-)
-from alex.ui.markdown import MarkdownStatic, markdown_to_text, normalize_tables
-from alex.ui.panels import ChatLog, GoalCard, QueueButton, QueueCard
-from alex.ui.state import _load_ui_state, _save_ui_state
-from alex.ui.widgets import (
-    ChangesSummary,
-    InlineDiffCard,
-    PromptInput,
-    ToolDiffCard,
-    UserMessage,
-    _changes_label,
-    _changes_text,
-    _format_tokens,
-)
-
-
+from alex.settings import SettingsData, SettingsScreen
+from alex.ui.state import _save_ui_state
 
 
 class InputSettingsMixin:
@@ -87,7 +17,12 @@ class InputSettingsMixin:
 
     def _open_settings(self) -> None:
         self._start_settings_spinner()
-        self.run_worker(self._open_settings_async(), exclusive=True)
+        # 设置页单独占一个 worker group：默认组里可能正挂着权限确认
+        # （_ask_confirm 在等用户点 Allow/Deny）。用 exclusive=True 放在默认组
+        # 会把它一起取消，简洁模式的 finally 会直接摘掉权限卡；拆组后互不干扰。
+        self.run_worker(
+            self._open_settings_async(), exclusive=True, group="settings"
+        )
 
     def _start_settings_spinner(self) -> None:
         """Settings 文字左侧显示加载指示，和对话中的 spinner 同款。"""
@@ -136,16 +71,9 @@ class InputSettingsMixin:
                 return
             self._settings_cache = data
         screen = SettingsScreen(
-            [tuple(item) for item in data.get("sections", [])],
-            skills=[tuple(item) for item in data.get("skills", [])],
-            rules=[tuple(item) for item in data.get("rules", [])],
-            skill_details=data.get("skill_details") or {},
-            rule_details=data.get("rule_details") or {},
-            mcp_servers=[tuple(item) for item in data.get("mcp_servers", [])],
-            mcp_tools=[tuple(item) for item in data.get("mcp_tools", [])],
-            tokens=data.get("tokens") or {},
-            memory=data.get("memory") or {},
-            display_mode=getattr(self, "_display_mode", "developer"),
+            SettingsData.from_payload(
+                data, display_mode=getattr(self, "_display_mode", "developer")
+            ),
             on_visibility_change=self._set_agent_visibility,
             on_display_mode_change=self._set_display_mode,
         )
@@ -155,6 +83,19 @@ class InputSettingsMixin:
             await asyncio.sleep(remain)
         self._stop_settings_spinner()
         changed = await self.push_screen_wait(screen)
+        # 没有改动时不重建聊天区。只开关设置页就全量重建，会把仅存在于
+        # 当前界面的中间 assistant 文本、已作答 ask 行冲掉（history 里未必
+        # 都有对应记录）。
+        if changed:
+            self._render_history()
+        elif self.view.thinking:
+            # 不重建聊天区时，Textual 的 Collapsible 正文可能停留在弹层
+            # 关闭前的一帧；主动把当前思考正文重绘一次。
+            self._update_thinking()
+        self._refresh_meta_line()
+        # 设置弹层关闭后把键盘焦点交还主输入框，避免继续输入时落进
+        # Settings 按钮或答题卡的自定义输入。
+        self._restore_prompt_focus()
         # 关闭后数据可能已变：清缓存并后台刷新，下次打开依旧秒开
         self._settings_cache = None
         self.run_worker(self._prefetch_settings(), exclusive=False)

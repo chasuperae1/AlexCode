@@ -167,18 +167,18 @@ class AskChoice(Vertical):
                 yield row
             self._other_row = AskOption(
                 len(self.options),
-                "其他（自己输入）",
-                "Tab 直接输入",
+                "Other (custom input)",
+                "Tab to type",
                 multi=self.multi,
                 other=True,
             )
             yield self._other_row
         with Horizontal(classes="ask-hint"):
             yield Static(self._hint_text(), classes="ask-hint-left", markup=False)
-            yield Static("Esc 跳过", classes="ask-hint-right", markup=False)
-        yield AskInput(placeholder="输入自定义回答…", classes="ask-input")
+            yield Static("Esc Skip", classes="ask-hint-right", markup=False)
+        yield AskInput(placeholder="Enter a custom answer…", classes="ask-input")
         yield Static(
-            "Enter 发送 · Esc 返回选项", classes="ask-custom-hint", markup=False
+            "Enter Send · Esc Back to options · Tab Message", classes="ask-custom-hint", markup=False
         )
         yield Horizontal(
             Static("✓", classes="ask-tick"),
@@ -188,20 +188,23 @@ class AskChoice(Vertical):
 
     def on_mount(self) -> None:
         self._refresh()
-        self.focus()
+        # 用户可能正在主输入框打字，或刚从 Settings 返回；不要一律抢焦点。
+        # 只有当前整个界面没有焦点时才由答题卡接管键盘。
+        if self.app.focused is None:
+            self.focus()
 
     def _hint_text(self) -> str:
         count = len(self.options)
         if self.multi:
             hint = (
-                f"↑↓ 移动 · 1–{count} 直选 · Space 勾选 · A 全选 · Enter 提交"
-                " · Tab 输入"
+                f"↑↓ Move · 1–{count} Select · Space Toggle · A All · Enter Submit"
+                " · Tab Message"
             )
             if self._selected:
-                hint += f" · 已选 {len(self._selected)} 项"
+                hint += f" · {len(self._selected)} selected"
             return hint
         return (
-            f"↑↓ 移动 · 1–{count} 直选 · Enter 确认 · Tab 输入"
+            f"↑↓ Move · 1–{count} Select · Enter Confirm · Tab Message"
         )
 
     def _refresh(self) -> None:
@@ -234,9 +237,13 @@ class AskChoice(Vertical):
             return
         if self._mode == "custom":
             if key == "tab":
-                # 自定义输入时不希望 Tab 把焦点移走
+                # 自定义回答里 Tab 也不能被困住：退出自定义并回主输入框。
                 event.stop()
                 event.prevent_default()
+                self._exit_custom()
+                handler = getattr(self.app, "_restore_prompt_focus", None)
+                if handler is not None:
+                    handler()
             return
         handled = True
         if key in {"up", "k"}:
@@ -264,7 +271,17 @@ class AskChoice(Vertical):
         elif key == "enter":
             self._confirm()
         elif key == "tab":
-            self._enter_custom()
+            if self._index == len(self.options):
+                self._enter_custom()
+            else:
+                # Tab 是用户切回主输入框的常用动作，不能无条件吸进自定义回答。
+                # 只有高亮在 Other 行时才进入自定义输入；独立控件没有应用层
+                # 输入框可回退时，仍保留原来的 Tab 进入自定义行为。
+                handler = getattr(self.app, "_restore_prompt_focus", None)
+                if handler is not None:
+                    handler()
+                else:
+                    self._enter_custom()
         else:
             handled = False
         if handled:
@@ -297,12 +314,17 @@ class AskChoice(Vertical):
         self._refresh()
 
     def _confirm(self) -> None:
-        if self._mode == "custom":
-            self._submit_custom()
-            return
         if self._index == len(self.options):
-            self._enter_custom()
+            if self._mode == "custom":
+                self._submit_custom()
+            else:
+                self._enter_custom()
             return
+        # 点选普通选项时必须退出自定义模式，否则会误提交空的自定义答案。
+        if self._mode == "custom":
+            self._mode = "options"
+            self.remove_class("-custom")
+            self._refresh()
         if self.multi:
             if not self._selected:
                 self._selected.add(self._index)

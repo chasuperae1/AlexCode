@@ -5,6 +5,8 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 
+from alex.core.formatting import format_duration  # noqa: F401 (re-exported)
+
 SHELL_TOOLS = frozenset({"Bash", "Cmd", "PowerShell", "Shell"})
 LONG_RUNNING_SECONDS = 300.0
 MIN_VISIBLE_SECONDS = 1.0
@@ -74,18 +76,3 @@ class ActivityTracker:
             shells=shells,
             elapsed=elapsed,
         )
-
-
-def format_duration(seconds: float) -> str:
-    """Format elapsed time as 12s / 6m12s / 1h06m."""
-
-    total = max(0, int(seconds))
-    if total < 60:
-        return f"{total}s"
-    minutes, remainder = divmod(total, 60)
-    if minutes < 60:
-        if remainder:
-            return f"{minutes}m{remainder:02d}s"
-        return f"{minutes}m"
-    hours, minutes = divmod(minutes, 60)
-    return f"{hours}h{minutes:02d}m"

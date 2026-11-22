@@ -4,42 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 import time
-import uuid
-from copy import deepcopy
-from dataclasses import asdict
-from datetime import datetime
-from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
-from pydantic import BaseModel, Field
 
-from alex.config import (
-    CONFIG,
-    LOCKED_SKILLS,
-    ROOT,
-    lock_skill_files,
-    project_path,
-    reload_config,
-    save_config,
-    workspace_path,
-)
-from alex.core.images import build_user_message, display_text
-from alex.core import reasoning
-from alex.core.snapshots import Checkpoint, SnapshotError, SnapshotStore, now_label
 
 from alex.session.common import (
-    ASSISTANT,
-    BOOT_STAGES,
-    DEFAULT_WELCOME,
-    Emit,
-    GOAL_RESTATEMENT_PROMPT,
-    GoalRestatement,
-    READONLY_TOOLS,
     SessionError,
-    USER,
-    _format_tokens,
 )
 
 
@@ -73,173 +44,199 @@ class QueueMixin:
         return {"started": True}
 
     async def _run_queue(self, text: str, before: set[str]) -> None:
-        results: list[tuple[str, str, str]] = []
+        """队列主流程：规划确认 → 逐条执行 → 汇总收尾。"""
         try:
-            plan = (
-                "Plan a queue of small, independent tasks for the request "
-                "below.\n\n"
-                "Rules:\n"
-                "- If any task needs another task's output or completion "
-                "first, do NOT call TaskCreate. Explain the dependency and "
-                "ask the user to run the tasks one at a time.\n"
-                "- Otherwise call TaskCreate once per task, in execution "
-                "order.\n"
-                "- Do not start any task now.\n\n"
-                f"Request:\n{text}"
-            )
-            try:
-                await self._start_turn(plan, f"/queue {text}")
-            except asyncio.CancelledError:
-                self._queue_stop = True
+            prepared = await self._prepare_queue(text, before)
+            if prepared is None:
                 return
-            if self._queue_stop:
-                return
-            new_tasks = [
-                task
-                for task in self.agent.state.tasks_context.tasks
-                if task.id not in before
-            ]
-            if not new_tasks:
-                self._notice(
-                    "Queue not started — the tasks depend on each other. "
-                    "Run them one at a time.",
-                    title="Queue",
-                    severity="warning",
-                    timeout=8,
-                )
-                return
-
-            total = len(new_tasks)
-            self._queue_total = total
-            self._queue_subjects = [task.subject for task in new_tasks]
-            self._queue_task_ids = [task.id for task in new_tasks]
-            self._queue_confirming = True
-            payload = self._queue_card_payload("confirming")
-            self.history.append(
-                ("queue_card", json.dumps(payload, ensure_ascii=False))
-            )
-            self._queue_card_index = len(self.history) - 1
-            self.emit("queue_card", payload)
-            self._progress(f"Queue 0/{total} · awaiting start", "warn")
-            self._phase = "confirming"
-            self._emit_status()
-            self._refresh_tasks()
-
-            decision = await self._wait_queue_decision()
-            if decision != "start" or self._queue_stop:
-                self._update_queue_card("cancelled")
-                self._progress(f"Queue 0/{total} · not started", "muted")
-                # 丢弃后立即落盘，避免 daemon 重启后任务又出现在列表里
-                await self._drop_queue_tasks()
-                return
-
-            self._queue_confirming = False
-            self._update_queue_card("started")
-            self._phase = "running"
-            self._emit_status()
-            started = time.monotonic()
-
-            for index, task in enumerate(new_tasks, 1):
-                self._queue_index = index
-                done_now = sum(1 for _, state, _ in results if state == "done")
-                self._progress(
-                    f"Queue {index}/{total} · {done_now}/{total} done"
-                )
-                if self._queue_stop:
-                    results.append((task.subject, "skipped", ""))
-                    continue
-                if task.state == "completed":
-                    results.append((task.subject, "done", ""))
-                    continue
-
-                header = f"Queue {index}/{total} · {task.subject}"
-                self.history.append(("queue", header))
-                self.emit(
-                    "queue",
-                    {"index": index, "total": total, "subject": task.subject},
-                )
-                self._refresh_tasks()
-                prompt = (
-                    "Work only on this queued task. Do not touch other "
-                    "queued tasks.\n\n"
-                    f"Task:\n{task.subject}\n{task.description or ''}\n\n"
-                    "When it is fully done, mark it completed with "
-                    f'TaskUpdate(task_id="{task.id}", status="completed"). '
-                    "If it cannot be completed, leave the status unchanged "
-                    "and reply with one short sentence explaining why."
-                )
-                try:
-                    answer = await self._start_turn(
-                        prompt, header, label=task.subject, bubble=False
-                    )
-                except asyncio.CancelledError:
-                    current = asyncio.current_task()
-                    if current is not None and current.cancelling():
-                        raise  # 会话关闭导致整个队列被取消
-                    self._queue_stop = True
-                    answer = ""
-
-                if task.state == "completed":
-                    results.append((task.subject, "done", ""))
-                elif self._queue_stop:
-                    if task.state == "in_progress":
-                        task.state = "pending"
-                    results.append((task.subject, "skipped", ""))
-                else:
-                    results.append(
-                        (task.subject, "failed", self._one_line(answer))
-                    )
-                    # 失败的任务退回 pending，避免下次空闲时误显示为运行中
-                    if task.state == "in_progress":
-                        task.state = "pending"
-                    self._refresh_tasks()
-
-            done = sum(1 for _, status, _ in results if status == "done")
-            failed = sum(1 for _, status, _ in results if status == "failed")
-            skipped = sum(1 for _, status, _ in results if status == "skipped")
-            payload = {
-                "results": [list(item) for item in results],
-                "done": done,
-                "failed": failed,
-                "skipped": skipped,
-                "seconds": max(0, int(time.monotonic() - started)),
-            }
-            self.history.append(
-                ("queue_result", json.dumps(payload, ensure_ascii=False))
-            )
-            self.emit("queue_result", payload)
-            self._update_queue_card("done")
-            self._progress("")
-            # 队列结束即清理本次任务：结果卡已记录成败，旧任务不再堆到下一次队列
-            await self._drop_queue_tasks()
+            tasks, total, started = prepared
+            results = await self._execute_queue(tasks, total)
+            await self._finish_queue(results, started)
         except asyncio.CancelledError:
             raise
-        except Exception as exc:
+        except Exception as exc:  # 规划 / 执行任一环节失败：提示并清理，不拖垮会话
+            await self._fail_queue(exc)
+        finally:
+            self._reset_queue_state()
+
+    async def _prepare_queue(
+        self, text: str, before: set[str]
+    ) -> tuple[list[Any], int, float] | None:
+        """让模型把请求拆成独立任务，并等用户确认；不需要执行时返回 None。"""
+        plan = (
+            "Plan a queue of small, independent tasks for the request "
+            "below.\n\n"
+            "Rules:\n"
+            "- If any task needs another task's output or completion "
+            "first, do NOT call TaskCreate. Explain the dependency and "
+            "ask the user to run the tasks one at a time.\n"
+            "- Otherwise call TaskCreate once per task, in execution "
+            "order.\n"
+            "- Do not start any task now.\n\n"
+            f"Request:\n{text}"
+        )
+        try:
+            await self._start_turn(plan, f"/queue {text}")
+        except asyncio.CancelledError:
+            self._queue_stop = True
+            return None
+        if self._queue_stop:
+            return None
+        new_tasks = [
+            task
+            for task in self.agent.state.tasks_context.tasks
+            if task.id not in before
+        ]
+        if not new_tasks:
             self._notice(
-                f"Queue failed: {exc}",
+                "Queue not started — the tasks depend on each other. "
+                "Run them one at a time.",
                 title="Queue",
-                severity="error",
+                severity="warning",
                 timeout=8,
             )
-            self._progress("")
+            return None
+
+        total = len(new_tasks)
+        self._queue_total = total
+        self._queue_subjects = [task.subject for task in new_tasks]
+        self._queue_task_ids = [task.id for task in new_tasks]
+        self._queue_confirming = True
+        payload = self._queue_card_payload("confirming")
+        self.history.append(
+            ("queue_card", json.dumps(payload, ensure_ascii=False))
+        )
+        self._queue_card_index = len(self.history) - 1
+        self.emit("queue_card", payload)
+        self._progress(f"Queue 0/{total} · awaiting start", "warn")
+        self._phase = "confirming"
+        self._emit_status()
+        self._refresh_tasks()
+
+        decision = await self._wait_queue_decision()
+        if decision != "start" or self._queue_stop:
+            self._update_queue_card("cancelled")
+            self._progress(f"Queue 0/{total} · not started", "muted")
+            # 丢弃后立即落盘，避免 daemon 重启后任务又出现在列表里
             await self._drop_queue_tasks()
-        finally:
-            # 会话关闭等外部取消路径也要清理，落盘交给 close()
-            self._discard_queue_tasks()
-            self._queue_active = False
-            self._queue_stop = False
-            self._queue_task = None
-            self._queue_index = 0
-            self._queue_total = 0
-            self._queue_confirming = False
-            self._queue_decision = None
-            self._queue_task_ids = []
-            self._queue_subjects = []
-            self._queue_card_index = None
-            self._queue_before_ids = set()
-            self._phase = "running"
-            self._set_busy(False)
+            return None
+
+        self._queue_confirming = False
+        self._update_queue_card("started")
+        self._phase = "running"
+        self._emit_status()
+        return new_tasks, total, time.monotonic()
+
+    async def _execute_queue(
+        self, tasks: list[Any], total: int
+    ) -> list[tuple[str, str, str]]:
+        """逐条执行队列任务；返回 (subject, 状态, 失败原因) 列表。"""
+        results: list[tuple[str, str, str]] = []
+        for index, task in enumerate(tasks, 1):
+            self._queue_index = index
+            done_now = sum(1 for _, state, _ in results if state == "done")
+            self._progress(f"Queue {index}/{total} · {done_now}/{total} done")
+            if self._queue_stop:
+                results.append((task.subject, "skipped", ""))
+                continue
+            if task.state == "completed":
+                results.append((task.subject, "done", ""))
+                continue
+
+            header = f"Queue {index}/{total} · {task.subject}"
+            self.history.append(("queue", header))
+            self.emit(
+                "queue",
+                {"index": index, "total": total, "subject": task.subject},
+            )
             self._refresh_tasks()
+            prompt = (
+                "Work only on this queued task. Do not touch other "
+                "queued tasks.\n\n"
+                f"Task:\n{task.subject}\n{task.description or ''}\n\n"
+                "When it is fully done, mark it completed with "
+                f'TaskUpdate(task_id="{task.id}", status="completed"). '
+                "If it cannot be completed, leave the status unchanged "
+                "and reply with one short sentence explaining why."
+            )
+            try:
+                answer = await self._start_turn(
+                    prompt, header, label=task.subject, bubble=False
+                )
+            except asyncio.CancelledError:
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
+                    raise  # 会话关闭导致整个队列被取消
+                self._queue_stop = True
+                answer = ""
+
+            if task.state == "completed":
+                results.append((task.subject, "done", ""))
+            elif self._queue_stop:
+                if task.state == "in_progress":
+                    task.state = "pending"
+                results.append((task.subject, "skipped", ""))
+            else:
+                results.append(
+                    (task.subject, "failed", self._one_line(answer))
+                )
+                # 失败的任务退回 pending，避免下次空闲时误显示为运行中
+                if task.state == "in_progress":
+                    task.state = "pending"
+                self._refresh_tasks()
+        return results
+
+    async def _finish_queue(
+        self, results: list[tuple[str, str, str]], started: float
+    ) -> None:
+        """汇总执行结果：推结果卡、收进度，并清理本次任务。"""
+        done = sum(1 for _, status, _ in results if status == "done")
+        failed = sum(1 for _, status, _ in results if status == "failed")
+        skipped = sum(1 for _, status, _ in results if status == "skipped")
+        payload = {
+            "results": [list(item) for item in results],
+            "done": done,
+            "failed": failed,
+            "skipped": skipped,
+            "seconds": max(0, int(time.monotonic() - started)),
+        }
+        self.history.append(
+            ("queue_result", json.dumps(payload, ensure_ascii=False))
+        )
+        self.emit("queue_result", payload)
+        self._update_queue_card("done")
+        self._progress("")
+        # 队列结束即清理本次任务：结果卡已记录成败，旧任务不再堆到下一次队列
+        await self._drop_queue_tasks()
+
+    async def _fail_queue(self, exc: Exception) -> None:
+        """规划或执行异常：提示用户，并清掉这次拆出来的任务。"""
+        self._notice(
+            f"Queue failed: {exc}",
+            title="Queue",
+            severity="error",
+            timeout=8,
+        )
+        self._progress("")
+        await self._drop_queue_tasks()
+
+    def _reset_queue_state(self) -> None:
+        """无论正常结束还是被取消，都复位队列状态（落盘交给 close()）。"""
+        self._discard_queue_tasks()
+        self._queue_active = False
+        self._queue_stop = False
+        self._queue_task = None
+        self._queue_index = 0
+        self._queue_total = 0
+        self._queue_confirming = False
+        self._queue_decision = None
+        self._queue_task_ids = []
+        self._queue_subjects = []
+        self._queue_card_index = None
+        self._queue_before_ids = set()
+        self._phase = "running"
+        self._set_busy(False)
+        self._refresh_tasks()
 
     async def queue_confirm(self) -> dict[str, Any]:
         """用户确认开始：释放队列任务，继续执行。"""
@@ -320,6 +317,6 @@ class QueueMixin:
 
         try:
             await asyncio.to_thread(save_state, self.agent.state)
-        except Exception:
+        except Exception:  # 尽力保存队列状态，失败不影响丢弃流程
             pass
 

@@ -3,27 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-import json
-import logging
-import re
-import shutil
-import time
 from collections.abc import AsyncGenerator, Awaitable, Callable
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
-from typing import Literal
 
-from pydantic import BaseModel, Field
 
 from agentscope.agent import Agent
-from agentscope.message import Msg, SystemMsg, UserMsg
-from agentscope.middleware import MiddlewareBase
+from agentscope.message import Msg
 
 from alex.memory.models import (
-    Lesson,
-    _CONSOLIDATION_LOCK,
-    _CuratedMemory,
-    _LessonList,
     clear_memory,
     logger,
 )
@@ -195,7 +183,7 @@ class CoreMixin:
                 task.cancel()
                 try:
                     await task
-                except asyncio.CancelledError:
+                except asyncio.CancelledError:  # 取消后台整理任务，CancelledError 属预期
                     pass
         self._consolidation_task = None
         self._reflection_task = None

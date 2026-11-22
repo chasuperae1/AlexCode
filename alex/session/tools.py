@@ -5,42 +5,23 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-import time
 import uuid
-from copy import deepcopy
-from dataclasses import asdict
-from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
-from pydantic import BaseModel, Field
 
 from alex.config import (
-    CONFIG,
-    LOCKED_SKILLS,
     ROOT,
-    lock_skill_files,
     project_path,
-    reload_config,
-    save_config,
     workspace_path,
 )
-from alex.core.images import build_user_message, display_text
-from alex.core import reasoning
-from alex.core.snapshots import Checkpoint, SnapshotError, SnapshotStore, now_label
 
 from alex.session.common import (
-    ASSISTANT,
-    BOOT_STAGES,
-    DEFAULT_WELCOME,
-    Emit,
-    GOAL_RESTATEMENT_PROMPT,
-    GoalRestatement,
-    READONLY_TOOLS,
     SessionError,
-    USER,
-    _format_tokens,
 )
+
+# 与 alex.ui.activity.SHELL_TOOLS 保持一致；这里不引 UI 模块，避免会话层依赖界面
+_SHELL_TOOLS = frozenset({"Bash", "Cmd", "PowerShell", "Shell"})
 
 
 def skill_name_from_path(path: str) -> str:
@@ -89,6 +70,12 @@ class ToolsMixin:
                 diff_text = ""
             request_id = uuid.uuid4().hex
             allow_always = not decision.bypass_immune
+            # shell 权限卡需要原始命令和目录；“Always allow”还要说清记住哪条规则
+            rules = [
+                {"content": str(getattr(rule, "rule_content", "") or "").strip()}
+                for rule in (decision.suggested_rules or [])
+                if str(getattr(rule, "rule_content", "") or "").strip()
+            ]
             payload = {
                 "request_id": request_id,
                 "agent": agent_name,
@@ -97,6 +84,9 @@ class ToolsMixin:
                 "reason": decision.decision_reason or "",
                 "allow_always": allow_always,
                 "diff": diff_text,
+                "command": str(tool_input.get("command") or ""),
+                "cwd": str(workspace_path()),
+                "rules": rules,
             }
             self._pending_confirm = payload
             self._pending_future = asyncio.get_running_loop().create_future()
@@ -114,6 +104,98 @@ class ToolsMixin:
                 self._set_activity("")
             return choice
 
+    def _record_shell_card(self, payload: dict[str, Any], state: str) -> None:
+        """把 shell 权限卡写进 history：换主题或重开 TUI 后还能按原样重建。"""
+        if not payload or str(payload.get("tool") or "") not in _SHELL_TOOLS:
+            return
+        entry = {
+            key: payload.get(key)
+            for key in (
+                "request_id",
+                "agent",
+                "tool",
+                "command",
+                "cwd",
+                "reason",
+                "allow_always",
+                "rules",
+                "detail",
+            )
+        }
+        entry["state"] = state
+        self._shell_card_index = len(self.history)
+        self.history.append(("shell_card", json.dumps(entry, ensure_ascii=False)))
+        self._save_history()
+
+    def _finish_shell_card(
+        self,
+        tool_name: str,
+        ok: bool,
+        text: str,
+        *,
+        stats: dict[str, Any] | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> bool:
+        """工具跑完后回填卡片状态；返回 True 表示该结果已由 shell 卡承载。"""
+        if tool_name not in _SHELL_TOOLS:
+            return False
+        stats = stats or {}
+        index = self._shell_card_index
+        entry: dict[str, Any] | None = None
+        if index is not None and index < len(self.history):
+            kind, raw = self.history[index]
+            if kind == "shell_card":
+                try:
+                    candidate = json.loads(raw)
+                except (TypeError, ValueError):
+                    candidate = None
+                if (
+                    isinstance(candidate, dict)
+                    and str(candidate.get("tool") or "") == tool_name
+                ):
+                    entry = candidate
+        if entry is None:
+            # bypass / 自动放行没有权限卡：补一条只含状态的 shell 记录，
+            # 保证简洁摘要、开发者卡片在重建后都有数据来源。
+            entry = {
+                key: (payload or {}).get(key)
+                for key in (
+                    "request_id",
+                    "agent",
+                    "tool",
+                    "command",
+                    "cwd",
+                    "reason",
+                    "allow_always",
+                    "rules",
+                    "detail",
+                )
+            }
+            entry["tool"] = tool_name
+            entry["state"] = "done" if ok else "failed"
+            entry["result_text"] = text
+            entry.update(stats)
+            self.history.append(
+                ("shell_card", json.dumps(entry, ensure_ascii=False))
+            )
+            self._save_history()
+            return True
+        if entry.get("state") == "denied":
+            # 用户拒绝后命令没有执行，结果事件不能把 denied 覆盖成 failed
+            return True
+        entry["state"] = "done" if ok else "failed"
+        entry["result_text"] = text
+        entry.update(stats)
+        if not ok:
+            entry["fail_text"] = text or f"{tool_name} failed"
+        self.history[index] = (
+            "shell_card",
+            json.dumps(entry, ensure_ascii=False),
+        )
+        self._shell_card_index = None
+        self._save_history()
+        return True
+
     async def confirm(self, request_id: str, choice: str) -> None:
         """回应一个待决的权限请求。"""
         from alex.core.permissions import ConfirmChoice
@@ -128,6 +210,11 @@ class ToolsMixin:
             value = ConfirmChoice(choice)
         except ValueError as exc:
             raise SessionError("internal", f"unknown choice: {choice}") from exc
+        self._shell_card_index = None
+        self._record_shell_card(
+            self._pending_confirm,
+            "denied" if value == ConfirmChoice.DENY else "allowed",
+        )
         if not self._pending_future.done():
             self._pending_future.set_result(value)
         self.emit("confirm_end", {"request_id": request_id, "choice": value.value})
@@ -143,13 +230,13 @@ class ToolsMixin:
             path.write_text(
                 json.dumps(payload, ensure_ascii=False), encoding="utf-8"
             )
-        except OSError:
+        except OSError:  # 落盘失败则只在内存里保留待答
             pass
 
     def _clear_pending_ask(self) -> None:
         try:
             self._pending_ask_path().unlink(missing_ok=True)
-        except OSError:
+        except OSError:  # 待答文件不存在
             pass
 
     def _restore_pending_ask(self) -> None:
@@ -198,7 +285,7 @@ class ToolsMixin:
                 "ask_end",
                 {
                     "request_id": request_id,
-                    "summary": "已取消",
+                    "summary": "Cancelled",
                     "skipped": True,
                     "choices": [],
                     "other": "",
@@ -304,18 +391,19 @@ class ToolsMixin:
     @staticmethod
     def _ask_summary(answer: dict[str, Any]) -> str:
         images = [str(item) for item in answer.get("images", []) if str(item)]
-        suffix = f"（附 {len(images)} 张图片）" if images else ""
+        count = len(images)
+        suffix = f" ({count} image{'s' if count != 1 else ''} attached)" if images else ""
         if answer.get("skipped"):
-            return "已跳过 · 按默认策略继续"
+            return "Skipped · Continuing with defaults"
         other = str(answer.get("other", "")).strip()
         if other:
-            return f"已输入：{other}{suffix}"
+            return f"Entered: {other}{suffix}"
         choices = [str(item) for item in answer.get("choices", []) if str(item)]
         if choices:
-            return "已选择：" + "、".join(choices) + suffix
+            return "Selected: " + ", ".join(choices) + suffix
         if images:
-            return f"已附 {len(images)} 张图片"
-        return "已跳过"
+            return f"Attached {count} image{'s' if count != 1 else ''}"
+        return "Skipped"
 
     async def interrupt(self) -> None:
         """停止当前回复。"""
@@ -345,13 +433,13 @@ class ToolsMixin:
         if self._backend is not None:
             try:
                 await self._backend.kill_all()
-            except Exception:
+            except Exception:  # 杀子进程失败也要继续等任务退出
                 pass
         try:
             await task
-        except asyncio.CancelledError:
+        except asyncio.CancelledError:  # 任务已取消，属中断收尾
             pass
-        except Exception:
+        except Exception:  # 任务异常退出，属中断收尾
             pass
         self._stopping = False
         self._emit_status()

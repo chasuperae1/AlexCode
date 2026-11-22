@@ -6,12 +6,13 @@ from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
-from textual.screen import ModalScreen
 from textual.widgets import OptionList, Static
 from textual.widgets.option_list import Option
 
+from alex.screens.modal_base import OptionListModal
 
-class PickerScreen(ModalScreen[str | None]):
+
+class PickerScreen(OptionListModal):
     """标题 + 单选列表 + 一行快捷键提示，关闭时返回选中项 id。"""
 
     BINDINGS = [
@@ -76,14 +77,7 @@ class PickerScreen(ModalScreen[str | None]):
                 label.append("   current", style="dim")
                 highlight = index
             options.add_option(Option(label, id=name))
-        options.highlighted = highlight
-        options.focus()
-
-    def on_option_list_option_selected(
-        self,
-        event: OptionList.OptionSelected,
-    ) -> None:
-        self.dismiss(str(event.option.id))
+        self._focus_list(options, highlight)
 
     def action_cancel(self) -> None:
         self.dismiss(None)

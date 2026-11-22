@@ -111,7 +111,7 @@ def clear_session_file(path: Path, pid: int | None = None) -> None:
         return
     try:
         path.unlink()
-    except FileNotFoundError:
+    except FileNotFoundError:  # 记录已被其他进程清理
         pass
 
 

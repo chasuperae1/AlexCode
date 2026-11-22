@@ -399,7 +399,7 @@ class SnapshotStore:
                 encoding="utf-8",
             )
             tmp.replace(self._checkpoint_file)
-        except OSError:
+        except OSError:  # 快照落盘失败不阻断本轮对话
             pass
 
     async def add_checkpoint(self, checkpoint: Checkpoint) -> list[Checkpoint]:

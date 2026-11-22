@@ -8,7 +8,17 @@ from textual.containers import Horizontal
 from textual.message import Message
 from textual.widgets import Static
 
-class StatusDot(Static):
+
+class _ClickFocusMixin:
+    """点击开关时聚焦并切换；子类提供 ``toggle``。"""
+
+    def _on_click(self, event) -> None:
+        event.stop()
+        self.focus()
+        self.toggle()
+
+
+class StatusDot(_ClickFocusMixin, Static):
     """可聚焦的圆点开关：启用为绿色，排除为灰色。"""
 
     can_focus = True
@@ -44,12 +54,8 @@ class StatusDot(Static):
     def action_toggle_dot(self) -> None:
         self.toggle()
 
-    def _on_click(self, event) -> None:
-        event.stop()
-        self.focus()
-        self.toggle()
 
-class ModeSwitch(Static):
+class ModeSwitch(_ClickFocusMixin, Static):
     """左右切换的显示模式开关：两段文字，当前段高亮，整块可点击。"""
 
     can_focus = True
@@ -108,11 +114,6 @@ class ModeSwitch(Static):
         )
 
     def action_toggle_mode(self) -> None:
-        self.toggle()
-
-    def _on_click(self, event) -> None:
-        event.stop()
-        self.focus()
         self.toggle()
 
 

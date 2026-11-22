@@ -5,7 +5,7 @@ from __future__ import annotations
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
-from textual.screen import ModalScreen
+from alex.screens.modal_base import OptionListModal
 from textual.widgets import OptionList, Static
 from textual.widgets.option_list import Option
 
@@ -16,7 +16,7 @@ ALWAYS = "always"
 DENY = "deny"
 
 
-class ConfirmScreen(ModalScreen[str | None]):
+class ConfirmScreen(OptionListModal):
     """要求用户确认一次敏感操作。返回 allow / always / deny。"""
 
     BINDINGS = [
@@ -120,14 +120,7 @@ class ConfirmScreen(ModalScreen[str | None]):
                 Option("Always allow this pattern (session)", id=ALWAYS)
             )
         options.add_option(Option("Deny", id=DENY))
-        options.highlighted = 0
-        options.focus()
-
-    def on_option_list_option_selected(
-        self,
-        event: OptionList.OptionSelected,
-    ) -> None:
-        self.dismiss(str(event.option.id))
+        self._focus_list(options)
 
     def action_deny(self) -> None:
         self.dismiss(DENY)

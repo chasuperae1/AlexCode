@@ -3,19 +3,15 @@
 from __future__ import annotations
 
 import time
-from pathlib import Path
 
 from rich.text import Text
 from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.message import Message
-from textual.widgets import Markdown, Static
+from textual.containers import Horizontal, Vertical
+from textual.widgets import Static
+from termui.widgets import SPINNER_FRAMES
 
-from alex.ui.constants import QUEUE_CARD_LIMIT
 from alex.ui.panels_queue import QueueButton
-from alex.ui.sources import format_bytes
-from alex.ui.widgets import ChangesSummary, UserMessage
-
+from alex.ui.timing import ensure_interval, stop_timer
 
 
 class GoalCard(Vertical):
@@ -55,14 +51,14 @@ class GoalCard(Vertical):
         self._timer = None
         self._body = Static(self._render_content(), classes="goal-body")
         self._confirm = QueueButton(
-            "确认并开始", "goal_confirm", classes="goal-act goal-confirm"
+            "Confirm and start", "goal_confirm", classes="goal-act goal-confirm"
         )
         self._confirm_key = Static("(enter)", classes="goal-key")
-        self._edit = QueueButton("修改需求", "goal_edit", classes="goal-act goal-edit")
+        self._edit = QueueButton("Edit request", "goal_edit", classes="goal-act goal-edit")
         self._edit_key = Static("(m)", classes="goal-key")
-        self._cancel = QueueButton("取消", "goal_cancel", classes="goal-act goal-cancel")
+        self._cancel = QueueButton("Cancel", "goal_cancel", classes="goal-act goal-cancel")
         self._cancel_key = Static("(esc)", classes="goal-key")
-        self._note = Static("尚未执行", classes="goal-note")
+        self._note = Static("Not started", classes="goal-note")
         self._sync_classes()
 
     def compose(self) -> ComposeResult:
@@ -86,7 +82,7 @@ class GoalCard(Vertical):
     def on_unmount(self) -> None:
         self._stop_timer()
 
-    _BRAILLE = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+    _BRAILLE = SPINNER_FRAMES
 
     def _elapsed(self) -> float:
         if self._started is None:
@@ -99,17 +95,12 @@ class GoalCard(Vertical):
         if self._payload.get("live") and phase in {"understanding", "clarifying"}:
             if self._timer is None:
                 self._started = time.monotonic()
-                self._timer = self.set_interval(0.1, self._tick)
+                self._timer = ensure_interval(self, None, self._tick)
             return
         self._stop_timer()
 
     def _stop_timer(self) -> None:
-        if self._timer is not None:
-            try:
-                self._timer.stop()
-            except Exception:
-                pass
-            self._timer = None
+        self._timer = stop_timer(self._timer)
         self._started = None
 
     def _tick(self) -> None:
@@ -125,15 +116,15 @@ class GoalCard(Vertical):
         elapsed = self._elapsed()
         frame = self._BRAILLE[int(elapsed * 10) % len(self._BRAILLE)]
         if phase == "clarifying":
-            title = "Goal · 补充条件"
+            title = "Goal · Additional details"
             total = int(payload.get("questions") or 0)
             done = int(payload.get("answered") or 0)
             meta = f"{done}/{total} · {frame} {elapsed:.1f}s"
-            body = "回答下面的问题，Esc 可跳过本题。"
+            body = "Answer the questions below. Press Esc to skip one."
         else:
-            title = "Goal · 理解需求中"
+            title = "Goal · Understanding request"
             meta = f"{frame} {elapsed:.1f}s"
-            body = "正在把需求拆成可执行的约束…"
+            body = "Breaking your request down into actionable constraints…"
         head = Text()
         head.append(title, style=f"bold {theme.primary}")
         head.append(self._fill(len(title), len(meta), width))
@@ -144,7 +135,7 @@ class GoalCard(Vertical):
         lines = [head, line]
         if phase == "understanding" and elapsed >= 4:
             lines.append(
-                Text("  模型响应较慢，仍在等待…  Esc 取消", style=theme.secondary)
+                Text("  Model is taking longer than usual…  Esc Cancel", style=theme.secondary)
             )
         return Text("\n").join(lines)
 
@@ -171,7 +162,7 @@ class GoalCard(Vertical):
         self._note.display = confirming
         try:
             self.query_one(".goal-foot").display = confirming
-        except Exception:
+        except Exception:  # 底栏尚未挂载
             pass
 
     def _sync_classes(self) -> None:
@@ -195,23 +186,61 @@ class GoalCard(Vertical):
             self.set_class(target == name, name)
 
     def _render_content(self) -> Text:
-        theme = self._theme
-        payload = self._payload
-        phase = str(payload.get("phase") or "executing")
-        max_iters = max(1, int(payload.get("max_iters") or 1))
-        round_no = max(1, int(payload.get("round") or 1))
-        seconds = max(0, int(payload.get("seconds") or 0))
-        rows = payload.get("rows") or []
+        """按阶段渲染：理解中 / 待确认走理解块，其余走执行块 + 校验结论。"""
+        phase = str(self._payload.get("phase") or "executing")
+        width = self._content_width()
+        if phase in {"understanding", "clarifying", "awaiting_confirmation"}:
+            return self._render_understanding(width, phase)
+        return self._render_execute(width, phase)
+
+    def _content_width(self) -> int:
         try:
             width = self.content_size.width
             if width <= 0:
                 width = self.size.width - 2
-        except Exception:
+        except Exception:  # 尚未挂载，拿不到实际尺寸
             width = 76
-        width = max(30, min(width, 160))
+        return max(30, min(width, 160))
 
+    def _render_understanding(self, width: int, phase: str) -> Text:
+        """理解中：转圈提示；理解完毕：摘要 + 已确认约束 + 确认提示。"""
         if phase in {"understanding", "clarifying"}:
             return self._render_live(width, phase)
+        theme = self._theme
+        lines = [self._render_head(phase, width), self._render_summary()]
+        brief = self._payload.get("brief") or []
+        if brief:
+            row = Text()
+            row.append("   Confirmed constraints  ", style=theme.secondary)
+            for index, item in enumerate(brief):
+                if index:
+                    row.append(" · ", style=theme.secondary)
+                key = str(item.get("key") or "")
+                value = str(item.get("value") or "")
+                if key:
+                    row.append(f"{key}: ", style=theme.secondary)
+                row.append(value, style=theme.foreground)
+            lines.append(row)
+        lines.append(
+            Text(
+                "Execution starts after confirmation. Edit the request and press Enter to confirm again.",
+                style=theme.secondary,
+            )
+        )
+        return Text("\n").join(lines)
+
+    def _render_execute(self, width: int, phase: str) -> Text:
+        """执行中 / 已结束：标题 + 任务摘要 + 每轮列表 + 校验结论。"""
+        lines = [self._render_head(phase, width), self._render_summary()]
+        lines.extend(self._render_rows(width))
+        lines.append(self._render_verify(phase, width))
+        return Text("\n").join(lines)
+
+    def _render_head(self, phase: str, width: int) -> Text:
+        theme = self._theme
+        payload = self._payload
+        max_iters = max(1, int(payload.get("max_iters") or 1))
+        round_no = max(1, int(payload.get("round") or 1))
 
         if phase == "passed":
             suffix = "" if round_no == 1 else "s"
@@ -231,7 +260,7 @@ class GoalCard(Vertical):
             meta = f"FAILED · ROUND {round_no}/{max_iters}"
             title_style = meta_style = f"bold {theme.error}"
         elif phase == "awaiting_confirmation":
-            title = "Goal · 任务确认"
+            title = "Goal · Confirm task"
             meta = "AWAITING CONFIRMATION"
             title_style = f"bold {theme.primary}"
             meta_style = theme.secondary
@@ -246,37 +275,25 @@ class GoalCard(Vertical):
         head.append(title, style=title_style)
         head.append(self._fill(len(title), len(meta), width))
         head.append(meta, style=meta_style)
+        return head
 
+    def _render_summary(self) -> Text:
+        theme = self._theme
+        payload = self._payload
         goal = Text()
         goal.append("1  ", style=theme.secondary)
-        goal.append("我理解的任务：", style=theme.secondary)
+        goal.append("Task summary: ", style=theme.secondary)
         goal.append(
             str(payload.get("restatement") or payload.get("goal") or ""),
             style=theme.foreground,
         )
+        return goal
 
-        lines = [head, goal]
-        brief = payload.get("brief") or []
-        if phase == "awaiting_confirmation" and brief:
-            row = Text()
-            row.append("   已确认约束  ", style=theme.secondary)
-            for index, item in enumerate(brief):
-                if index:
-                    row.append(" · ", style=theme.secondary)
-                key = str(item.get("key") or "")
-                value = str(item.get("value") or "")
-                if key:
-                    row.append(f"{key}：", style=theme.secondary)
-                row.append(value, style=theme.foreground)
-            lines.append(row)
-        if phase == "awaiting_confirmation":
-            hint = Text(
-                "确认后才开始执行；修改需求后按 Enter 重新确认。",
-                style=theme.secondary,
-            )
-            lines.extend((hint,))
-            return Text("\n").join(lines)
-        for row in rows:
+    def _render_rows(self, width: int) -> list[Text]:
+        """每轮 execute / verify 一行：序号、阶段、结果、耗时。"""
+        theme = self._theme
+        lines: list[Text] = []
+        for row in self._payload.get("rows") or []:
             is_execute = row.get("phase") == "execute"
             index = str(row.get("round") or "") if is_execute else ""
             label = "execute" if is_execute else "verify"
@@ -300,7 +317,14 @@ class GoalCard(Vertical):
             line.append(body, style=color)
             line.append(" " * max(1, room - len(body)) + tail, style=theme.secondary)
             lines.append(line)
+        return lines
 
+    def _render_verify(self, phase: str, width: int) -> Text:
+        """底部结论行：轮次/耗时、失败轮数或停止说明。"""
+        theme = self._theme
+        payload = self._payload
+        round_no = max(1, int(payload.get("round") or 1))
+        seconds = max(0, int(payload.get("seconds") or 0))
         failed_rounds = int(payload.get("failed_rounds") or 0)
         if phase == "passed":
             suffix = "" if round_no == 1 else "s"
@@ -327,9 +351,7 @@ class GoalCard(Vertical):
             foot.append(right, style=theme.secondary)
         else:
             foot.append(left[:width], style=theme.secondary)
-        lines.append(foot)
-
-        return Text("\n").join(lines)
+        return foot
 
     @staticmethod
     def _fill(left: int, right: int, width: int) -> str:

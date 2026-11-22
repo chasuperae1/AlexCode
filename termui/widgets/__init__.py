@@ -5,6 +5,7 @@ from .hierarchy_menu import HierarchyMenu, MenuNode
 from .progress import ProgressBar
 from .prompt_input import PromptInput
 from .scroll_list import ListItem, ScrollList
+from .spinner import SPINNER_FRAMES
 from .status_panel import StatusPanel
 
 __all__ = [
@@ -16,4 +17,5 @@ __all__ = [
     "HierarchyMenu",
     "MenuNode",
     "StatusPanel",
+    "SPINNER_FRAMES",
 ]

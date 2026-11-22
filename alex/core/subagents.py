@@ -44,6 +44,7 @@ from alex.core.permissions import (
     PermissionGate,
     resolve_permission_mode,
 )
+from alex.core.tool_chunks import error_chunk
 from alex.core.tools import Cmd, WebSearch
 
 # 子代理能用的工具：完整读写 + 命令执行 + 联网检索
@@ -128,13 +129,6 @@ def _system_prompt(
     if rules:
         parts.append(f"<rules>\n{rules}\n</rules>")
     return "\n".join(parts)
-
-
-def _error(message: str) -> ToolChunk:
-    return ToolChunk(
-        content=[TextBlock(text=message)],
-        state=ToolResultState.ERROR,
-    )
 
 
 class Subagent(ToolBase):
@@ -224,7 +218,7 @@ levels: main agent + one sub agent).
     ) -> ToolChunk:
         prompt = (prompt or "").strip()
         if not prompt:
-            return _error(
+            return error_chunk(
                 "`prompt` is required: define the sub agent's role and the "
                 "full task."
             )
@@ -234,7 +228,7 @@ levels: main agent + one sub agent).
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # 模型/工具异常交还给主代理
-            return _error(f"Subagent failed: {exc}")
+            return error_chunk(f"Subagent failed: {exc}")
 
         return ToolChunk(
             content=[TextBlock(text=text or "(subagent returned no text)")],

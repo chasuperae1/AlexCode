@@ -67,7 +67,7 @@ class DirectoryPicker(ModalScreen[Path | None]):
     def _normalize(path: Path) -> Path:
         try:
             path = path.expanduser().resolve()
-        except OSError:
+        except OSError:  # 路径不可解析时保留原路径
             pass
         if path.is_file():
             path = path.parent

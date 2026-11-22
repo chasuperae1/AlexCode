@@ -2,81 +2,22 @@
 
 from __future__ import annotations
 
-import asyncio
-import json
-import re
-import sys
-import time
-from pathlib import Path
-
-import frontmatter
-from rich.console import Console
-from rich.style import Style
 from rich.text import Text
-from textual._wrap import compute_wrap_offsets
-from textual import work
-from textual.app import ComposeResult
-from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.message import Message
 from textual.screen import ModalScreen
-from textual.widgets import Collapsible, Markdown, OptionList, RichLog, Static
-from textual.widgets.option_list import Option
+from textual.widgets import Collapsible, Static
 
-from termui import PromptInput as TermPromptInput, TermUIApp
-
-from alex.screens.ask_choice import AskChoice
-from alex.daemon.client import DaemonClient, LinkError, LocalLink, ensure_daemon, prewarm_daemon
-from alex.screens.confirm import ALLOW, ALWAYS, DENY, ConfirmScreen
-from alex.config import CONFIG, ROOT, reload_config, workspace_path
-from alex.screens.diff import DiffScreen, diff_lines, parse_diff, render_diff
-from alex.screens.dir_picker import DirectoryPicker
-from alex.core.images import grab_clipboard_image, split_images
-from alex.screens.message_actions import COPY, REVERT, MessageActionsScreen
-from alex.screens.permission import PermissionScreen
 from alex.screens.picker import PickerScreen
-from alex.settings import SettingsScreen
-from alex.core.snapshots import Checkpoint
-from alex.ui.themes import DEFAULT_THEME, THEMES, next_theme, theme_label, theme_name
-from alex.ui.sources import load_sources
 from alex.ui.activity import MIN_VISIBLE_SECONDS, format_duration
-from alex.ui.boot import LoadingOverlay, _gradient_banner, _hex_rgb, _render_boot_panel
-from alex.ui.constants import (
-    ASSISTANT,
-    DEBUG_KINDS,
-    LOCAL_TOOLS,
-    PROMPT_PLACEHOLDER,
-    QUEUE_CARD_LIMIT,
-    UI_STATE_PATH,
-    USER,
-    _BOOT_BANNER,
-    _BOOT_LABELS,
-    _BOOT_ORDER,
-    _BOOT_SPINNER,
-    _BOX_END,
-    _BOX_MID,
-    _BOX_START,
-    _BOX_V,
-    _IMAGE_TOKEN,
-    _TDC_MAX_LINES,
-)
-from alex.ui.markdown import MarkdownStatic, markdown_to_text, normalize_tables
-from alex.ui.panels import ChatLog, GoalCard, QueueButton, QueueCard
-from alex.ui.state import _load_ui_state, _save_ui_state
-from alex.ui.widgets import (
-    ChangesSummary,
-    InlineDiffCard,
-    PromptInput,
-    ToolDiffCard,
-    UserMessage,
-    _changes_label,
-    _changes_text,
-    _format_tokens,
-)
-
+from alex.ui.constants import PROMPT_PLACEHOLDER
+from alex.ui.panels import GoalCard
+from alex.ui.sources import load_sources
+from alex.ui.themes import theme_label
+from alex.ui.widgets import PromptInput
 
 from alex.ui.app_chrome_theme import ChromeThemeMixin
 from alex.ui.app_chrome_palette import ChromePaletteMixin
+
+
 class ChromeMixin(ChromeThemeMixin, ChromePaletteMixin):
     """界面外围：主题、任务与进度、目标卡、模型选择、命令面板。"""
 
@@ -131,20 +72,20 @@ class ChromeMixin(ChromeThemeMixin, ChromePaletteMixin):
             self._goal_card_widget = None
         if phase in {"understanding", "clarifying"} or self._goal_confirming:
             placeholder = {
-                "understanding": "正在理解需求…",
-                "clarifying": "请在下方选择补充条件…",
+                "understanding": "Understanding your request…",
+                "clarifying": "Select additional details below…",
             }.get(phase)
             if placeholder is None:
                 placeholder = (
-                    "修改目标后按 Enter 重新确认…"
+                    "Edit the goal and press Enter to confirm again…"
                     if self._goal_editing
-                    else "等待目标确认…"
+                    else "Waiting for goal confirmation…"
                 )
             try:
                 prompt = self.query_one("#prompt", PromptInput)
                 prompt.disabled = not self._goal_editing
                 prompt.placeholder = placeholder
-            except Exception:
+            except Exception:  # 卡片可能已卸载，忽略查询失败
                 pass
 
     def _enter_verifier(self) -> None:
@@ -240,7 +181,7 @@ class ChromeMixin(ChromeThemeMixin, ChromePaletteMixin):
         try:
             self.query_one("#meta", Static).update(self._meta_text())
             self.query_one("#workspace-line", Static).update(self._workspace_line())
-        except Exception:
+        except Exception:  # 控件尚未挂载时跳过刷新
             pass
 
     def _task_status_text(self) -> Text | None:
@@ -302,7 +243,7 @@ class ChromeMixin(ChromeThemeMixin, ChromePaletteMixin):
             return
         try:
             self.query_one(".rule-summary", Collapsible).remove()
-        except Exception:
+        except Exception:  # 没有旧的摘要控件可移除
             pass
         widget = self._rules_summary_widget()
         if widget is None:
@@ -314,7 +255,7 @@ class ChromeMixin(ChromeThemeMixin, ChromePaletteMixin):
                 chat.mount(widget, before=children[0])
             else:
                 chat.mount(widget)
-        except Exception:
+        except Exception:  # 聊天区尚未挂载时跳过
             pass
 
     def _tick_spinner(self) -> None:

@@ -3,18 +3,38 @@
 from __future__ import annotations
 
 import time
-from pathlib import Path
 
 from rich.text import Text
 from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.message import Message
+from textual.containers import Vertical, VerticalScroll
 from textual.widgets import Markdown, Static
+from termui.widgets import SPINNER_FRAMES
 
-from alex.ui.constants import QUEUE_CARD_LIMIT
-from alex.ui.sources import format_bytes
 from alex.ui.widgets import ChangesSummary, UserMessage
 
+
+class CompactionStatus(Static):
+    """上下文压缩中的单行状态：复用 Settings 的盲文 spinner。"""
+
+    def __init__(self) -> None:
+        super().__init__(classes="compacting")
+        self._frame = 0
+
+    def on_mount(self) -> None:
+        self._render_frame()
+        self.set_interval(0.12, self._tick)
+
+    def _tick(self) -> None:
+        self._frame += 1
+        self._render_frame()
+
+    def _render_frame(self) -> None:
+        theme = self.app.current_theme
+        frame = SPINNER_FRAMES[self._frame % len(SPINNER_FRAMES)]
+        line = Text()
+        line.append(frame, style=f"bold {theme.accent}")
+        line.append(" Compacting context…", style=theme.secondary)
+        self.update(line)
 
 
 class ChatLog(VerticalScroll):
@@ -23,7 +43,16 @@ class ChatLog(VerticalScroll):
     只更新正在流式输出的那一个控件，避免整段对话反复重排。
     """
 
+    # 一次性挂载整段历史后，Markdown 高度要分几帧、按实际宽度重排才稳定，
+    # 所以贴底不能只做一次：短时间跟随内容变化，高度稳定后再停。
+    FOLLOW_INTERVAL = 0.1
+    FOLLOW_MAX_SECONDS = 3.0
     _suspend_scroll = False
+    _follow_timer = None
+    _follow_last_max = -1
+    _follow_stable = 0
+    _follow_last_y = 0
+    _follow_deadline = 0.0
 
     DEFAULT_CSS = """
     ChatLog {
@@ -76,6 +105,10 @@ class ChatLog(VerticalScroll):
         margin-top: 1;
         color: $secondary;
         text-style: bold;
+    }
+    ChatLog .compaction-block {
+        width: 1fr;
+        height: auto;
     }
     ChatLog .compaction-body {
         border-left: thick $secondary 40%;
@@ -151,9 +184,12 @@ class ChatLog(VerticalScroll):
     def compose(self) -> ComposeResult:
         yield Vertical(id="chat-body")
 
-    def clear(self) -> None:
+    def clear(self, keep=None) -> None:
+        """清空聊天区；``keep`` 指定的控件原地保留（未决权限卡等）。"""
         body = self.query_one("#chat-body")
         for child in list(body.children):
+            if keep is not None and child is keep:
+                continue
             child.remove()
 
     def on_click(self, event) -> None:
@@ -190,3 +226,51 @@ class ChatLog(VerticalScroll):
         """新控件挂上后贴底：高度要等布局完才算准，所以刷两帧。"""
         self.scroll_end(animate=False)
         self.call_after_refresh(self.scroll_end, animate=False)
+
+    def pin_bottom(self) -> None:
+        """外部（历史重建等）请求贴底，复用挂载时的两帧逻辑。"""
+        self._pin_to_bottom()
+
+    def follow_bottom(self, seconds: float = FOLLOW_MAX_SECONDS) -> None:
+        """贴底并在内容高度稳定前持续跟随。
+
+        历史整体重建时 ``mount_all`` 一次挂上几十上百个 Markdown 控件，首帧
+        只算出了部分高度；只贴一次会停在半途，重启后视口仍不在最新消息处。
+        这里每帧贴一次，连续两帧最大滚动值不再变化（或超时）就停止。
+        """
+        self._follow_deadline = time.monotonic() + seconds
+        self._follow_last_max = -1
+        self._follow_stable = 0
+        self._pin_to_bottom()
+        self._follow_last_y = self.max_scroll_y
+        if self._follow_timer is None:
+            self._follow_timer = self.set_interval(
+                self.FOLLOW_INTERVAL, self._follow_tick
+            )
+
+    def _follow_tick(self) -> None:
+        if self._follow_last_y and self.scroll_y + 3 < self._follow_last_y:
+            # 用户自己往上翻了：立即停止跟随，别把人拽回底部
+            self._stop_follow()
+            return
+        max_y = self.max_scroll_y
+        if max_y == self._follow_last_max:
+            self._follow_stable += 1
+        else:
+            self._follow_last_max = max_y
+            self._follow_stable = 0
+        self.scroll_end(animate=False)
+        self._follow_last_y = max_y
+        if (
+            self._follow_stable >= 2
+            or time.monotonic() >= self._follow_deadline
+        ):
+            self._stop_follow()
+
+    def _stop_follow(self) -> None:
+        self._follow_stable = 0
+        self._follow_last_max = -1
+        self._follow_last_y = 0
+        if self._follow_timer is not None:
+            self._follow_timer.stop()
+            self._follow_timer = None

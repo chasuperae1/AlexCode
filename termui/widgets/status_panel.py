@@ -6,7 +6,8 @@ from rich.text import Text
 from textual.app import RenderResult
 from textual.widget import Widget
 
-_SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+from .spinner import SPINNER_FRAMES as _SPINNER
+
 # 使用 ASCII 符号，避免部分终端缺少 ℹ ✔ 等字形显示成方块
 _ICONS = {
     "info": ("i", "status--info"),

@@ -5,14 +5,15 @@ from __future__ import annotations
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.screen import ModalScreen
 from textual.widgets import OptionList, Static
 from textual.widgets.option_list import Option
+
+from alex.screens.modal_base import OPTION_HINT, OptionListModal
 
 CANCEL = ""
 
 
-class PermissionScreen(ModalScreen[str | None]):
+class PermissionScreen(OptionListModal):
     """列出三种权限模式，返回选中的模式名。"""
 
     BINDINGS = [
@@ -79,10 +80,7 @@ class PermissionScreen(ModalScreen[str | None]):
             )
             yield OptionList(id="permission-options")
             with Horizontal(id="permission-actions"):
-                yield Static(
-                    "↑/↓ move · Enter select · Esc cancel",
-                    id="permission-hint",
-                )
+                yield Static(OPTION_HINT, id="permission-hint")
                 yield Static("Cancel", id="permission-cancel")
 
     def on_mount(self) -> None:
@@ -100,14 +98,7 @@ class PermissionScreen(ModalScreen[str | None]):
             )
             if name == self._current:
                 current_index = index
-        options.highlighted = current_index
-        options.focus()
-
-    def on_option_list_option_selected(
-        self,
-        event: OptionList.OptionSelected,
-    ) -> None:
-        self.dismiss(str(event.option.id))
+        self._focus_list(options, current_index)
 
     def on_click(self, event) -> None:
         if getattr(event.widget, "id", None) == "permission-cancel":

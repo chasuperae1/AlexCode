@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import re
 from enum import Enum
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from agentscope.middleware import MiddlewareBase
@@ -26,7 +27,7 @@ from agentscope.permission import (
 )
 from agentscope.tool import ToolBase
 
-from alex.config import CONFIG
+from alex.config import CONFIG, locked_skill_dirs
 
 MODE_NAMES = ("accept", "bypass", "explore")
 
@@ -94,6 +95,21 @@ ConfirmCallback = Callable[
     [str, ToolBase, dict[str, Any], PermissionDecision],
     Awaitable[ConfirmChoice],
 ]
+
+
+def is_locked_skill_path(path: str) -> bool:
+    """路径是否位于内置只读技能目录内。"""
+    try:
+        target = Path(path).expanduser().resolve()
+    except (OSError, RuntimeError):
+        return False
+    for folder in locked_skill_dirs():
+        try:
+            target.relative_to(folder.resolve())
+            return True
+        except (OSError, RuntimeError, ValueError):
+            continue
+    return False
 
 
 def resolve_permission_mode(value: str | None) -> PermissionMode:

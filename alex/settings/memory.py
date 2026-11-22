@@ -4,23 +4,11 @@ from __future__ import annotations
 
 from rich.text import Text
 from textual.app import ComposeResult
-from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.message import Message
-from textual.screen import ModalScreen
-from textual.widgets import Markdown, Select, Static
+from textual.containers import Vertical
+from textual.widgets import Static
 
-from alex.config import LOCKED_SKILLS
-
-from alex.settings.widgets import MemoryRow, StatusDot
-
-from alex.settings.constants import (
-    MODE_OPTIONS,
-    SECTION_META,
-    _format_size,
-    _mode_value,
-    _short_tokens,
-)
+from alex.settings.constants import _format_size
+from alex.settings.widgets import MemoryRow
 
 
 class MemoryMixin:

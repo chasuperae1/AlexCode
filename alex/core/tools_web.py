@@ -10,8 +10,7 @@ import subprocess
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
-from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from agentscope.message import TextBlock
 from agentscope.permission import PermissionBehavior, PermissionDecision
@@ -23,34 +22,9 @@ from agentscope.tool import (
 )
 from agentscope.tool._response import ToolResultState
 
-from alex.config import locked_skill_dirs
-from alex.core.permissions import is_dangerous_command
+from alex.core.permissions import is_locked_skill_path
 
 _UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AlexAgent/1.0"
-
-# 命中这些写法就视为“要改动文件”，配合内置技能路径做拒绝判断
-_WRITE_INTENT = re.compile(
-    r"(?:>>?|\bdel\b|\berase\b|\bren(?:ame)?\b|\bmove\b|\bcopy\b|\bxcopy\b"
-    r"|\battrib\b|\bicacls\b|\btakeown\b|\bmv\b|\brm\b|\bcp\b|\btee\b"
-    r"|\bset-content\b|\bout-file\b|\bremove-item\b|\bnew-item\b)",
-    re.IGNORECASE,
-)
-
-
-def is_locked_skill_path(path: str) -> bool:
-    """路径是否位于内置只读技能目录内。"""
-    try:
-        target = Path(path).expanduser().resolve()
-    except (OSError, RuntimeError):
-        return False
-    for folder in locked_skill_dirs():
-        try:
-            target.relative_to(folder.resolve())
-            return True
-        except (OSError, RuntimeError, ValueError):
-            continue
-    return False
-
 
 
 def _fetch(url: str, timeout: float) -> str:
@@ -173,14 +147,14 @@ class TrackedLocalBackend(LocalBackend):
                     killer.kill()
                     try:
                         await asyncio.wait_for(killer.wait(), timeout=1)
-                    except asyncio.TimeoutError:
+                    except asyncio.TimeoutError:  # 强杀后仍不退出：进程已不可控，放弃等待
                         pass
             else:
                 os.killpg(os.getpgid(process.pid), signal.SIGKILL)
         except (ProcessLookupError, OSError):
             try:
                 process.kill()
-            except ProcessLookupError:
+            except ProcessLookupError:  # 进程已自行退出
                 pass
         try:
             await asyncio.wait_for(process.wait(), timeout=2)
@@ -188,9 +162,9 @@ class TrackedLocalBackend(LocalBackend):
             try:
                 process.kill()
                 await asyncio.wait_for(process.wait(), timeout=1)
-            except (asyncio.TimeoutError, ProcessLookupError):
+            except (asyncio.TimeoutError, ProcessLookupError):  # 强杀后仍不退出，放弃
                 pass
-        except ProcessLookupError:
+        except ProcessLookupError:  # 进程已退出，无需等待
             pass
 
     async def kill_all(self) -> None:

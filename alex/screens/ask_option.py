@@ -1,24 +1,16 @@
-"""AskUser 的内联选择题控件。
+"""AskUser 的内联选择题控件：选项行与自定义输入行。
 
-按设计稿 v2：无卡片边框，只保留 ``?`` 提问行、缩进选项和一行快捷键提示。
-键盘操作由控件自身处理（焦点在控件上时）：
-- ↑↓ / j k：移动高亮
-- 1-9：单选直接提交，多选切换勾选
-- Space / a：多选勾选 / 全选
-- Enter：确认或提交
-- Tab：进入自定义输入
-- Esc：自定义输入时返回选项，否则跳过（由 App 的 escape 动作转发）
+选项行 ``AskOption`` 负责光标、编号、多选框与说明；输入行 ``AskInput``
+负责自定义回答。键盘交互由 ``AskChoice`` 统一处理。
 """
 
 from __future__ import annotations
 
-from typing import Any, Callable
-
-from rich.text import Text
-from textual import events
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Input, Static
+
+from alex.ui.widgets import anchor_terminal_cursor
 
 
 
@@ -122,6 +114,12 @@ class AskOption(Horizontal):
 
 class AskInput(Input):
     """自定义回答输入框：Ctrl+V / Alt+V / F6 优先尝试粘贴剪贴板里的图片。"""
+
+    def on_focus(self, event) -> None:
+        # Input 只在光标位置变化时同步 app.cursor_position。刚显示并聚焦时
+        # 位置没变，终端光标还停在 (0,0)，首次拼音的候选窗会跑到左上角。
+        # 聚焦后等一帧布局稳定，主动把终端光标锚到输入框真实位置。
+        self.call_after_refresh(lambda: anchor_terminal_cursor(self))
 
     def action_paste(self) -> None:
         self.run_worker(self._paste(), exclusive=True)

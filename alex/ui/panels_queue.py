@@ -2,19 +2,14 @@
 
 from __future__ import annotations
 
-import time
-from pathlib import Path
-
 from rich.text import Text
 from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical
 from textual.message import Message
-from textual.widgets import Markdown, Static
+from textual.widgets import Static
 
+from alex.core.formatting import format_duration
 from alex.ui.constants import QUEUE_CARD_LIMIT
-from alex.ui.sources import format_bytes
-from alex.ui.widgets import ChangesSummary, UserMessage
-
 
 
 class QueueButton(Static):
@@ -265,21 +260,10 @@ class QueueCard(Vertical):
 
         note = ""
         if self._results is not None:
-            note = f"total {self._format_seconds(self._seconds)}"
+            note = f"total {format_duration(self._seconds)}"
         elif self._state == "started":
             note = "esc to stop"
         elif self._state == "cancelled":
             note = "nothing was run"
         self._note.update(note)
         self._foot.display = confirming or bool(note)
-
-    @staticmethod
-    def _format_seconds(total: int) -> str:
-        total = max(0, int(total))
-        if total < 60:
-            return f"{total}s"
-        minutes, seconds = divmod(total, 60)
-        if minutes < 60:
-            return f"{minutes}m {seconds:02d}s"
-        hours, minutes = divmod(minutes, 60)
-        return f"{hours}h {minutes:02d}m"

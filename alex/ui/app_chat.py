@@ -4,61 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
-import sys
-import time
 from pathlib import Path
 
-import frontmatter
-from rich.console import Console
-from rich.style import Style
 from rich.text import Text
-from textual._wrap import compute_wrap_offsets
-from textual import work
-from textual.app import ComposeResult
-from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.message import Message
-from textual.screen import ModalScreen
-from textual.widgets import Collapsible, OptionList, RichLog, Static
-from textual.widgets.option_list import Option
+from textual.widgets import Static
 
-from termui import PromptInput as TermPromptInput, TermUIApp
-
-from alex.screens.ask_choice import AskChoice
-from alex.daemon.client import DaemonClient, LinkError, LocalLink, ensure_daemon, prewarm_daemon
-from alex.screens.confirm import ALLOW, ALWAYS, DENY, ConfirmScreen
-from alex.config import CONFIG, ROOT, reload_config, workspace_path
-from alex.screens.diff import DiffScreen, diff_lines, parse_diff, render_diff
-from alex.screens.dir_picker import DirectoryPicker
-from alex.core.images import grab_clipboard_image, split_images
 from alex.screens.message_actions import COPY, REVERT, MessageActionsScreen
-from alex.screens.permission import PermissionScreen
-from alex.screens.picker import PickerScreen
-from alex.settings import SettingsScreen
-from alex.core.snapshots import Checkpoint
-from alex.ui.themes import DEFAULT_THEME, THEMES, next_theme, theme_label, theme_name
-from alex.ui.boot import LoadingOverlay, _gradient_banner, _hex_rgb, _render_boot_panel
-from alex.ui.constants import (
-    ASSISTANT,
-    DEBUG_KINDS,
-    LOCAL_TOOLS,
-    PROMPT_PLACEHOLDER,
-    QUEUE_CARD_LIMIT,
-    UI_STATE_PATH,
-    USER,
-    _BOOT_BANNER,
-    _BOOT_LABELS,
-    _BOOT_ORDER,
-    _BOOT_SPINNER,
-    _BOX_END,
-    _BOX_MID,
-    _BOX_START,
-    _BOX_V,
-    _IMAGE_TOKEN,
-    _TDC_MAX_LINES,
-)
-from alex.ui.markdown import MarkdownStatic, markdown_to_text, normalize_tables
+from alex.ui.constants import ASSISTANT, USER
 from alex.ui.files import (
     Attachment,
     FileAttachmentCard,
@@ -66,22 +18,13 @@ from alex.ui.files import (
     open_file,
     split_file_links,
 )
-from alex.ui.panels import ChatLog, ConciseSummary, GoalCard, QueueButton, QueueCard
-from alex.ui.sources import format_bytes
-from alex.ui.state import _load_ui_state, _save_ui_state
-from alex.ui.widgets import (
-    ChangesSummary,
-    InlineDiffCard,
-    PromptInput,
-    ToolDiffCard,
-    UserMessage,
-    _changes_label,
-    _changes_text,
-    _format_tokens,
-)
+from alex.ui.markdown import MarkdownStatic
+from alex.ui.panels import ChatLog, GoalCard, QueueCard
+from alex.ui.widgets import PromptInput, UserMessage
 
 from alex.ui.app_chat_stream import ChatStreamMixin
 from alex.ui.app_chat_diff import ChatDiffMixin
+
 
 class ChatMixin(ChatStreamMixin, ChatDiffMixin):
     """聊天流入口：流式、diff、附件与消息操作通过组合提供。"""
@@ -155,7 +98,7 @@ class ChatMixin(ChatStreamMixin, ChatDiffMixin):
                 )
             )
         elif kind == "ask":
-            skipped = content.startswith("已跳过") or content.startswith("已取消")
+            skipped = content.startswith(("Skipped", "Cancelled", "已跳过", "已取消"))
             line = Text()
             line.append(
                 "⤼ " if skipped else "✓ ",
@@ -260,8 +203,6 @@ class ChatMixin(ChatStreamMixin, ChatDiffMixin):
             elif line.startswith("✗"):
                 out.append("✗", style=f"bold {theme.error}")
                 out.append(line[1:], style=theme.error)
-            elif line.startswith("–"):
-                out.append(line, style=theme.secondary)
             else:
                 out.append(line, style=theme.secondary)
         return Static(out, classes="queue-summary")
@@ -312,8 +253,6 @@ class ChatMixin(ChatStreamMixin, ChatDiffMixin):
 
     def open_message_actions(self, widget) -> None:
         """点击用户消息时打开操作菜单。"""
-
-        """点击用户消息时打开操作菜单。"""
         if self._busy or self._rewinding:
             self.notify(
                 "Busy — wait for the current operation",
@@ -325,7 +264,7 @@ class ChatMixin(ChatStreamMixin, ChatDiffMixin):
         prompt = getattr(widget, "message_text", "")
         index = None
         if exchange_id is not None:
-            for position, checkpoint in enumerate(self._checkpoints):
+            for position, checkpoint in enumerate(self.view.checkpoints):
                 if checkpoint.exchange_id == exchange_id:
                     index = position
                     break

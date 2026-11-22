@@ -4,42 +4,20 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
-import time
-import uuid
-from copy import deepcopy
 from dataclasses import asdict
-from datetime import datetime
-from pathlib import Path
-from typing import Any, Callable
 
-from pydantic import BaseModel, Field
 
 from alex.config import (
     CONFIG,
-    LOCKED_SKILLS,
-    ROOT,
     lock_skill_files,
     project_path,
-    reload_config,
-    save_config,
     workspace_path,
 )
-from alex.core.images import build_user_message, display_text
-from alex.core import reasoning
-from alex.core.snapshots import Checkpoint, SnapshotError, SnapshotStore, now_label
+from alex.core.snapshots import Checkpoint, SnapshotStore
 
 from alex.session.common import (
     ASSISTANT,
-    BOOT_STAGES,
     DEFAULT_WELCOME,
-    Emit,
-    GOAL_RESTATEMENT_PROMPT,
-    GoalRestatement,
-    READONLY_TOOLS,
-    SessionError,
-    USER,
-    _format_tokens,
 )
 
 
@@ -71,8 +49,13 @@ class BootMixin:
         # 内置技能（alexcode）标记为只读，避免被改写
         try:
             await asyncio.to_thread(lock_skill_files)
-        except Exception:
-            pass
+        except Exception as exc:  # 不阻止启动，但要让用户知道只读保护没生效
+            self._notice(
+                f"Skills 只读锁定失败：{exc}",
+                title="Skills 未锁定",
+                severity="warning",
+                timeout=6,
+            )
         try:
             rules, skills = self._scan_sources()
         except Exception:
@@ -129,7 +112,9 @@ class BootMixin:
         self.toolkit = toolkit
         # 历史在 agent 装配后从恢复的状态里取，和旧行为保持一致
         if restored:
-            self.history = self._history_from_state(self.agent.state)
+            self.history = self._restore_history(
+                self._history_from_state(self.agent.state)
+            )
             if not self.history:
                 self.history.append(
                     (
@@ -154,7 +139,13 @@ class BootMixin:
         self._init_snapshots()
         self._phase = "idle"
         self._ready.set()
-        self.emit("history_reset", {"history": self._history_payload()})
+        self.emit(
+            "history_reset",
+            {
+                "history": self._history_payload(),
+                "checkpoints": [asdict(item) for item in self._checkpoints],
+            },
+        )
         self.emit(
             "checkpoints", {"checkpoints": [asdict(item) for item in self._checkpoints]}
         )

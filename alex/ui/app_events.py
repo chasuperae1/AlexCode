@@ -4,77 +4,30 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
-import sys
-import time
 from pathlib import Path
 
-import frontmatter
-from rich.console import Console
-from rich.style import Style
 from rich.text import Text
-from textual._wrap import compute_wrap_offsets
-from textual import work
-from textual.app import ComposeResult
-from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.message import Message
-from textual.widgets import Collapsible, Markdown, OptionList, RichLog, Static
-from textual.widgets.option_list import Option
 
-from termui import PromptInput as TermPromptInput, TermUIApp
-
+from alex.config import reload_config
+from alex.daemon.client import LinkError
 from alex.screens.ask_choice import AskChoice
-from alex.daemon.client import DaemonClient, LinkError, LocalLink, ensure_daemon, prewarm_daemon
-from alex.screens.confirm import ALLOW, ALWAYS, DENY
-from alex.config import CONFIG, ROOT, reload_config, workspace_path
-from alex.screens.diff import DiffScreen, diff_lines, parse_diff, render_diff
-from alex.screens.dir_picker import DirectoryPicker
-from alex.core.images import grab_clipboard_image, split_images
-from alex.screens.message_actions import COPY, REVERT, MessageActionsScreen
-from alex.screens.permission import PermissionScreen
-from alex.screens.picker import PickerScreen
-from alex.settings import SettingsScreen
-from alex.core.snapshots import Checkpoint
-from alex.ui.themes import DEFAULT_THEME, THEMES, next_theme, theme_label, theme_name
-from alex.ui.boot import LoadingOverlay, _gradient_banner, _hex_rgb, _render_boot_panel
-from alex.ui.constants import (
-    ASSISTANT,
-    DEBUG_KINDS,
-    LOCAL_TOOLS,
-    PROMPT_PLACEHOLDER,
-    QUEUE_CARD_LIMIT,
-    UI_STATE_PATH,
-    USER,
-    _BOOT_BANNER,
-    _BOOT_LABELS,
-    _BOOT_ORDER,
-    _BOOT_SPINNER,
-    _BOX_END,
-    _BOX_MID,
-    _BOX_START,
-    _BOX_V,
-    _IMAGE_TOKEN,
-    _TDC_MAX_LINES,
-)
-from alex.ui.markdown import MarkdownStatic, markdown_to_text, normalize_tables
-from alex.ui.panels import ChatLog, ConciseSummary, GoalCard, QueueButton, QueueCard
-from alex.ui.state import _load_ui_state, _save_ui_state
-from alex.ui.widgets import (
-    ChangesSummary,
-    InlineDiffCard,
-    PermissionDiffCard,
-    PromptInput,
-    ToolDiffCard,
-    UserMessage,
-    _changes_label,
-    _changes_text,
-    _format_tokens,
-)
-
+from alex.screens.confirm import DENY
+from alex.ui.constants import ASSISTANT, PROMPT_PLACEHOLDER
+from alex.ui.activity import SHELL_TOOLS
+from alex.ui.panels import ChatLog, CompactionStatus
+from alex.ui.widgets import PermissionDiffCard, PromptInput, ShellPermissionCard
 
 from alex.ui.app_event_router import EventRouterMixin
 from alex.ui.app_history import HistoryMixin
+
+
+def permission_card_class(tool_name: str):
+    """shell 类工具用独立的命令卡；文件类工具仍走 diff 卡。"""
+    return (
+        ShellPermissionCard if tool_name in SHELL_TOOLS else PermissionDiffCard
+    )
+
+
 class EventsMixin(EventRouterMixin, HistoryMixin):
     """事件分发入口：路由、快照、确认与历史回放通过组合提供。"""
 
@@ -98,24 +51,23 @@ class EventsMixin(EventRouterMixin, HistoryMixin):
             self._refresh_loading()
         else:
             self._hide_loading()
-        self.history = [tuple(item) for item in data.get("history", [])]
-        self.stream_text = str(data.get("stream_text", "") or "")
-        self.thinking = str(data.get("thinking", "") or "")
+        self.view.apply_snapshot(data)
+        pending_ask = data.get("pending_ask")
+        if not pending_ask:
+            # 另一窗口已作答或请求已取消：快照重建前先丢掉本地旧问题
+            self._ask_payload = None
         self._meta_base = str(data.get("meta", "") or "")
         ws = data.get("workspace")
         if ws:
             self._workspace = str(ws)
             reload_config()
-        self._exchange_seq = int(data.get("exchange_seq", 0) or 0)
-        self._checkpoints = [
-            Checkpoint(**item) for item in data.get("checkpoints", []) or []
-        ]
         queue = data.get("queue") or {}
         self._set_queue_confirming(
             bool(queue.get("confirming")),
             int(queue.get("total", 0) or 0),
         )
         self._verifier_mode = False
+        self._live_tool_data.clear()
         self._goal_phase = str(data.get("goal_phase", "") or "")
         goal_confirmation = data.get("goal_confirmation") or {}
         self._goal_confirming = bool(goal_confirmation.get("active"))
@@ -138,19 +90,24 @@ class EventsMixin(EventRouterMixin, HistoryMixin):
         if self._goal_confirming:
             self.query_one("#prompt", PromptInput).disabled = True
             self.query_one("#prompt", PromptInput).placeholder = (
-                "等待目标确认…"
+                "Waiting for goal confirmation…"
             )
         if phase == "idle" and self._settings_cache is None:
             self.run_worker(self._prefetch_settings(), exclusive=False)
-        if phase != "initializing" and self.stream_text:
+        if phase != "initializing" and self.view.stream_text:
             self._begin_stream()
             self._stream_dirty = True
         pending = data.get("pending_confirm")
         if pending:
-            self.run_worker(self._ask_confirm(pending), exclusive=True)
+            self.run_worker(
+                self._ask_confirm(pending), exclusive=True, group="permission"
+            )
         pending_ask = data.get("pending_ask")
         if pending_ask:
             self._show_ask(pending_ask)
+        elif self._ask_payload:
+            # 另一窗口已作答或请求已取消：不要在本窗口重建时复活旧问题
+            self._ask_payload = None
 
     def _set_permission_lock(self, active: bool) -> None:
         """权限未决时锁住输入；选择后恢复，但仍受 busy / goal / queue 约束。"""
@@ -161,7 +118,7 @@ class EventsMixin(EventRouterMixin, HistoryMixin):
             return
         if active:
             prompt.disabled = True
-            prompt.placeholder = "等待权限确认…"
+            prompt.placeholder = "Waiting for permission…"
             return
         if self._goal_confirming or self._queue_confirming:
             return
@@ -169,18 +126,56 @@ class EventsMixin(EventRouterMixin, HistoryMixin):
         prompt.placeholder = PROMPT_PLACEHOLDER
         prompt.focus()
 
+    def _remember_shell_card(self, card, state: str) -> None:
+        """把已结束的 shell 卡记进历史，重建聊天区时按完成态重新挂出来。"""
+        if getattr(card, "finishes_as_diff", True):
+            return
+        entry = dict(getattr(card, "_payload", {}) or {})
+        if not entry:
+            return
+        entry["state"] = state
+        self.view.history.append(
+            ("shell_card", json.dumps(entry, ensure_ascii=False))
+        )
+
+    def _attach_permission_card(self) -> None:
+        """按当前主题重建卡片（主题切换后文字颜色也要跟着变）。"""
+        payload = getattr(self, "_permission_payload", None)
+        future = getattr(self, "_confirm_future", None)
+        if not payload or future is None or future.done():
+            return
+        card_class = permission_card_class(str(payload.get("tool") or ""))
+        card = card_class(
+            payload,
+            self.current_theme,
+            lambda value: (
+                future.set_result(value) if not future.done() else None
+            ),
+        )
+        self._permission_card = card
+        try:
+            chat = self._chat_ref or self.query_one("#chat", ChatLog)
+        except Exception:
+            return
+        chat.add_widget(card)
+        self._place_concise_summary(before=card)
+        card.focus()
+
     async def _ask_confirm(self, payload: dict) -> None:
-        """把权限请求变成聊天流里的内联 diff 卡，结果回传给 daemon。"""
+        """把权限请求变成聊天流里的内联卡：shell 用命令卡，文件用 diff 卡。"""
         request_id = str(payload.get("request_id", ""))
         if (
             request_id
             and request_id == self._confirm_request_id
             and self._permission_card is not None
         ):
+            # 历史重建会重挂卡片；同一次请求不重复建卡
             return
+        self._permission_payload = dict(payload)
         choice = None
         future = asyncio.get_running_loop().create_future()
-        card = PermissionDiffCard(
+        card_class = permission_card_class(str(payload.get("tool") or ""))
+        card = card_class(
             payload,
             self.current_theme,
             lambda value: (
@@ -194,11 +189,23 @@ class EventsMixin(EventRouterMixin, HistoryMixin):
         self._confirm_resolved = False
         self._set_permission_lock(True)
         self._set_activity("Waiting for approval…")
+        if self._concise and self._concise_card_widget() is None:
+            # 重启后直接恢复未决权限时 history 里还没有本轮摘要，先补一张，
+            # 保证“摘要在上、权限卡在下”，而不是只剩一张孤零零的权限卡。
+            summary = self._ensure_concise_summary()
+            if summary is not None:
+                summary.step(f"calling {str(payload.get('tool') or 'tool')}")
         try:
             chat = self._chat_ref or self.query_one("#chat", ChatLog)
             self._chat_ref = chat
             chat.add_widget(card)
             card.focus()
+            if self._concise:
+                summary = self._concise_card_widget()
+                if summary is not None and str(payload.get("tool") or "") in SHELL_TOOLS:
+                    tool = str(payload.get("tool") or "")
+                    summary.ensure_shell(tool)
+                    summary.wait_shell(tool)
             choice = await future
         except asyncio.CancelledError:
             raise
@@ -212,8 +219,24 @@ class EventsMixin(EventRouterMixin, HistoryMixin):
             self._confirm_screen = None
             self._set_activity("")
             self._set_permission_lock(False)
-            if choice == DENY:
+            tool = str(payload.get("tool") or "")
+            if self._concise:
+                summary = self._concise_card_widget()
+                if summary is not None and tool in SHELL_TOOLS:
+                    if choice == DENY:
+                        summary.deny_shell(tool)
+                    elif choice is not None:
+                        summary.allow_shell(tool)
+                if choice == DENY:
+                    self._remember_shell_card(card, "denied")
+                card.remove()
                 self._permission_card = None
+                self._permission_payload = None
+            elif choice == DENY:
+                card.set_state("denied")
+                self._remember_shell_card(card, "denied")
+                self._permission_card = None
+                self._permission_payload = None
         if self._confirm_resolved or self.link is None:
             # 另一个窗口已经回应了这个请求
             return
@@ -223,7 +246,7 @@ class EventsMixin(EventRouterMixin, HistoryMixin):
             )
         except (LinkError, Exception) as exc:
             card.set_state("failed")
-            card._payload["fail_text"] = f"权限回传失败：{exc}"
+            card._payload["fail_text"] = f"Permission reply failed: {exc}"
             self._permission_card = None
             self.notify(
                 f"Permission reply failed: {exc}",
@@ -239,14 +262,20 @@ class EventsMixin(EventRouterMixin, HistoryMixin):
         if self._ask_request_id == request_id and self._ask_widget is not None:
             return
         if self._ask_widget is not None:
-            self._ask_widget.mark_answer("已取消", skipped=True)
+            self._ask_widget.mark_answer("Cancelled", skipped=True)
+        self._ask_payload = dict(payload)
+        self._ensure_concise_summary()
         widget = AskChoice(payload, self._answer_ask)
         self._ask_widget = widget
         self._ask_request_id = request_id
         chat = self._chat_ref or self.query_one("#chat", ChatLog)
         self._chat_ref = chat
         chat.add_widget(widget)
+        self._place_concise_summary(before=widget)
         self._set_activity("Waiting for your answer…")
+        # 未答问题不能抢占主输入框：用户可能正想继续输入新问题。
+        # 答题选项仍可点击；键盘焦点默认留在底部 Message 框。
+        self._restore_prompt_focus()
 
     def _answer_ask(
         self,
@@ -300,29 +329,30 @@ class EventsMixin(EventRouterMixin, HistoryMixin):
             and request_id != self._ask_request_id
         ):
             return
-        summary = str(data.get("summary", "") or "已跳过")
+        summary = str(data.get("summary", "") or "Skipped")
         skipped = bool(data.get("skipped"))
         widget = self._ask_widget
         if widget is not None:
             widget.mark_answer(summary, skipped)
         else:
             self._append_block("ask", summary)
-        self.history.append(("ask", summary))
+        self.view.history.append(("ask", summary))
         self._ask_widget = None
         self._ask_request_id = ""
+        self._ask_payload = None
         self._seal_stream()
         self._restore_prompt_focus()
 
     def _seal_stream(self) -> None:
         """作答后封口正文块与思考组，后续内容另起新块排在答案之后。"""
-        segment = self.stream_text[self._stream_offset:]
+        segment = self.view.stream_text[self._stream_offset:]
         if self._stream_md is not None and segment:
             self._stream_md.update(segment)
         self._stream_md = None
-        self._stream_offset = len(self.stream_text)
+        self._stream_offset = len(self.view.stream_text)
         if self._thinking_box is not None:
-            self._finish_thinking(self.thinking.strip())
-        self.thinking = ""
+            self._finish_thinking(self.view.thinking.strip())
+        self.view.thinking = ""
         self._thinking_box = None
         self._thinking_static = None
         self._thinking_started = 0.0
@@ -330,7 +360,7 @@ class EventsMixin(EventRouterMixin, HistoryMixin):
     def _restore_prompt_focus(self) -> None:
         try:
             self.query_one("#prompt", PromptInput).focus()
-        except Exception:
+        except Exception:  # 输入框未挂载时无需聚焦
             pass
 
     def _show_compacting(self, active: bool) -> None:
@@ -343,10 +373,8 @@ class EventsMixin(EventRouterMixin, HistoryMixin):
             except Exception:
                 return
             self._chat_ref = chat
-            self._compacting_line = chat.add_static(
-                Text("↺ Compacting context…", style=self.current_theme.secondary),
-                classes="compacting",
-            )
+            self._compacting_line = CompactionStatus()
+            chat.add_widget(self._compacting_line)
         else:
             line, self._compacting_line = self._compacting_line, None
             if line is not None:
@@ -356,17 +384,18 @@ class EventsMixin(EventRouterMixin, HistoryMixin):
         self._verifier_mode = False
         self._goal_phase = ""
         if self._ask_widget is not None:
-            self._ask_widget.mark_answer("已取消", skipped=True)
+            self._ask_widget.mark_answer("Cancelled", skipped=True)
             self._ask_widget = None
             self._ask_request_id = ""
+            self._ask_payload = None
         self._show_compacting(False)
-        segment = self.stream_text[self._stream_offset:]
+        segment = self.view.stream_text[self._stream_offset:]
         streamed = self._turn_text_streamed
-        self.stream_text = ""
+        self.view.stream_text = ""
         self._turn_text_streamed = False
         text = str(data.get("text", "") or "")
         if text:
-            self.history.append((ASSISTANT, text))
+            self.view.history.append((ASSISTANT, text))
             display = segment if segment else (text if not streamed else "")
             if display:
                 if self._stream_md is None:
@@ -376,8 +405,8 @@ class EventsMixin(EventRouterMixin, HistoryMixin):
         self._stream_md = None
         self._stream_offset = 0
         if self._thinking_box is not None:
-            self._finish_thinking(self.thinking.strip())
-        self.thinking = ""
+            self._finish_thinking(self.view.thinking.strip())
+        self.view.thinking = ""
         self._thinking_box = None
         self._thinking_static = None
         self._thinking_started = 0.0
@@ -388,13 +417,6 @@ class EventsMixin(EventRouterMixin, HistoryMixin):
         duration = float(data.get("duration", 0.0))
         if self._concise:
             self._finish_concise_summary(duration)
-        self._append_turn_stats(
-            duration,
-            int(data.get("input_tokens", 0)),
-            int(data.get("output_tokens", 0)),
-            int(data.get("cache_tokens", 0)),
-            bool(data.get("compacted", False)),
-        )
 
     async def on_unmount(self) -> None:
         if self.link is not None:

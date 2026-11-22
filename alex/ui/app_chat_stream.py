@@ -1,85 +1,23 @@
-"""聊天流的流式/思考/工具行渲染。"""
+﻿"""聊天流的流式/思考/工具行渲染。"""
 
 from __future__ import annotations
 
-import asyncio
-import json
-import re
-import sys
 import time
-from pathlib import Path
 
-import frontmatter
-from rich.console import Console
-from rich.style import Style
 from rich.text import Text
-from textual._wrap import compute_wrap_offsets
-from textual import work
-from textual.app import ComposeResult
-from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.message import Message
-from textual.screen import ModalScreen
-from textual.widgets import Collapsible, OptionList, RichLog, Static
-from textual.widgets.option_list import Option
+from textual.containers import Vertical
+from textual.widgets import Collapsible, Static
 
-from termui import PromptInput as TermPromptInput, TermUIApp
-
-from alex.screens.ask_choice import AskChoice
-from alex.daemon.client import DaemonClient, LinkError, LocalLink, ensure_daemon, prewarm_daemon
-from alex.screens.confirm import ALLOW, ALWAYS, DENY, ConfirmScreen
-from alex.config import CONFIG, ROOT, reload_config, workspace_path
-from alex.screens.diff import DiffScreen, diff_lines, parse_diff, render_diff
-from alex.screens.dir_picker import DirectoryPicker
-from alex.core.images import grab_clipboard_image, split_images
-from alex.screens.message_actions import COPY, REVERT, MessageActionsScreen
-from alex.screens.permission import PermissionScreen
-from alex.screens.picker import PickerScreen
-from alex.settings import SettingsScreen
-from alex.core.snapshots import Checkpoint
-from alex.ui.themes import DEFAULT_THEME, THEMES, next_theme, theme_label, theme_name
-from alex.ui.boot import LoadingOverlay, _gradient_banner, _hex_rgb, _render_boot_panel
-from alex.ui.constants import (
-    ASSISTANT,
-    DEBUG_KINDS,
-    LOCAL_TOOLS,
-    PROMPT_PLACEHOLDER,
-    QUEUE_CARD_LIMIT,
-    UI_STATE_PATH,
-    USER,
-    _BOOT_BANNER,
-    _BOOT_LABELS,
-    _BOOT_ORDER,
-    _BOOT_SPINNER,
-    _BOX_END,
-    _BOX_MID,
-    _BOX_START,
-    _BOX_V,
-    _IMAGE_TOKEN,
-    _TDC_MAX_LINES,
-)
-from alex.ui.markdown import MarkdownStatic, markdown_to_text, normalize_tables
-from alex.ui.files import (
-    Attachment,
-    FileAttachmentCard,
-    copy_file_to_clipboard,
-    open_file,
-    split_file_links,
-)
-from alex.ui.panels import ChatLog, ConciseSummary, GoalCard, QueueButton, QueueCard
+from alex.ui.markdown import MarkdownStatic
+from alex.ui.activity import SHELL_TOOLS
+from alex.ui.constants import ASSISTANT
+from alex.ui.panels import ChatLog, ConciseSummary
 from alex.ui.sources import format_bytes
-from alex.ui.state import _load_ui_state, _save_ui_state
-from alex.ui.widgets import (
-    ChangesSummary,
-    InlineDiffCard,
-    PromptInput,
-    ToolDiffCard,
-    UserMessage,
-    _changes_label,
-    _changes_text,
-    _format_tokens,
-)
+from alex.ui.widgets import _format_tokens
 
+# 流式正文超过这个长度就只保留尾部，避免超长 Markdown 反复重排
+_STREAM_TRUNCATE = 5000
+_STREAM_TAIL = 3000
 
 
 class ChatStreamMixin:
@@ -97,15 +35,55 @@ class ChatStreamMixin:
     def _begin_concise_summary(self) -> None:
         """每轮开头挂一张汇总卡，运行中只有这一行。"""
         card = ConciseSummary(self.current_theme)
+        card.exchange_id = int(getattr(self.view, "exchange_seq", 0) or 0) or None
         state = getattr(self, "_sources", None)
         if state is not None:
             card.set_rules(len(state.rules), state.rules_size)
         self._chat().add_widget(card)
         self._concise_card = card
 
+    def _ensure_concise_summary(self) -> ConciseSummary | None:
+        """重建/权限/提问补卡时，保证简洁模式始终有本轮 step 卡。"""
+        if not self._concise:
+            return None
+        card = self._concise_card_widget()
+        if card is None:
+            self._begin_concise_summary()
+            card = self._concise_card_widget()
+        return card
+
     def _concise_card_widget(self) -> ConciseSummary | None:
         card = getattr(self, "_concise_card", None)
         return card if isinstance(card, ConciseSummary) else None
+
+    def _place_concise_summary(self, before=None) -> None:
+        """把 step 卡放到正文之后、未决权限/选择题之前。"""
+        if not self._concise:
+            return
+        card = self._concise_card_widget()
+        if card is None:
+            return
+        try:
+            body = self._chat().query_one("#chat-body")
+        except Exception:
+            return
+        if card.parent is not body:
+            return
+        target = before
+        if target is None or target.parent is not body:
+            for pending in (
+                getattr(self, "_permission_card", None),
+                getattr(self, "_ask_widget", None),
+            ):
+                if pending is not None and pending.parent is body:
+                    target = pending
+                    break
+        if target is not None and target is not card:
+            body.move_child(card, before=target)
+            return
+        others = [child for child in body.children if child is not card]
+        if others:
+            body.move_child(card, after=others[-1])
 
     def _finish_concise_summary(self, duration: float) -> None:
         card = self._concise_card_widget()
@@ -118,7 +96,7 @@ class ChatStreamMixin:
         if self._concise:
             self._thinking_box = None
             self._thinking_static = None
-            card = self._concise_card_widget()
+            card = self._ensure_concise_summary()
             if card is not None:
                 card.set_activity("thinking")
             return
@@ -136,9 +114,9 @@ class ChatStreamMixin:
         if self._thinking_static is None or self._thinking_box is None:
             return
         theme = self.current_theme
-        text = self.thinking
-        if len(text) > self._STREAM_TRUNCATE:
-            text = "… (earlier content hidden)\n" + text[-self._STREAM_TAIL:]
+        text = self.view.thinking
+        if len(text) > _STREAM_TRUNCATE:
+            text = "… (earlier content hidden)\n" + text[-_STREAM_TAIL:]
         self._thinking_static.update(self._thinking_text(text, theme))
         elapsed = time.monotonic() - self._thinking_started
         self._thinking_box.title = f"Thinking · {elapsed:.1f}s"
@@ -249,6 +227,12 @@ class ChatStreamMixin:
             if card is not None:
                 name = str(data.get("name") or data.get("label") or "tool")
                 card.step(f"calling {name}")
+                if name in SHELL_TOOLS:
+                    card.start_shell(name, tool_id)
+            return
+        name = str(data.get("name") or data.get("label") or "tool")
+        if name in SHELL_TOOLS:
+            # 开发者模式由 shell 卡承载命令与输出，不再追加重复的工具行
             return
         theme = self.current_theme
         kind = str(data.get("kind", "tool"))
@@ -257,6 +241,28 @@ class ChatStreamMixin:
         row = Static(line, classes=self._tool_row_classes())
         self._chat().add_widget(row)
         if tool_id:
+            self._tool_rows[tool_id] = row
+
+    def _restore_live_tool_rows(self, before=None) -> None:
+        """重建聊天区后把仍在运行的工具行补回去（仅 developer 模式）。"""
+        if self._concise:
+            return
+        live = dict(getattr(self, "_live_tool_data", {}) or {})
+        if not live:
+            return
+        theme = self.current_theme
+        chat = self._chat()
+        for tool_id, data in live.items():
+            name = str(data.get("name") or data.get("label") or "tool")
+            if name in SHELL_TOOLS:
+                continue
+            label = str(data.get("label") or name)
+            line = self._event_line(
+                str(data.get("kind", "tool")), label, theme
+            )
+            line.append(" …", style=theme.secondary)
+            row = Static(line, classes=self._tool_row_classes())
+            chat.mount(row, before=before)
             self._tool_rows[tool_id] = row
 
     def _tool_row_classes(self) -> str:
@@ -280,10 +286,25 @@ class ChatStreamMixin:
         if self._concise:
             card = self._concise_card_widget()
             if card is not None:
-                if skill:
+                if name in SHELL_TOOLS:
+                    card.finish_shell(
+                        name,
+                        ok,
+                        elapsed,
+                        lines=int(data.get("line_count", 0) or 0),
+                        exit_code=data.get("exit_code"),
+                        call_id=tool_id,
+                    )
+                    if skill:
+                        card.add_skill(skill, size, elapsed)
+                elif skill:
                     card.add_skill(skill, size, elapsed)
                 else:
                     card.add_tool(name, ok, str(data.get("text", "")))
+            if tool_id:
+                self._tool_rows.pop(tool_id, None)
+            return
+        if name in SHELL_TOOLS:
             if tool_id:
                 self._tool_rows.pop(tool_id, None)
             return
@@ -307,14 +328,24 @@ class ChatStreamMixin:
         避免节流导致最后一小段被丢掉。
         """
         if self._stream_md is not None:
-            segment = self.stream_text[self._stream_offset:]
-            if len(segment) > self._STREAM_TRUNCATE:
+            raw = self.view.stream_text[self._stream_offset:]
+            segment = raw
+            if len(segment) > _STREAM_TRUNCATE:
                 segment = (
-                    "… (earlier content hidden)\n" + segment[-self._STREAM_TAIL:]
+                    "… (earlier content hidden)\n" + segment[-_STREAM_TAIL:]
                 )
+            # 工具/思考之前的中间 assistant 文本也要进 history，否则主题
+            # 切换或设置变更触发重建时，这段只存在于当前界面的文字会消失。
+            persisted = raw.strip()
+            if persisted:
+                self.view.history.append((ASSISTANT, persisted))
             self._render_stream_segment(segment)
             self._stream_md = None
-            self._stream_offset = len(self.stream_text)
+            # 已落进 history 的中间正文不能继续留在流式缓冲里，否则重建时
+            # 会同时挂出 history 版和当前流式版两份。
+            self.view.stream_text = ""
+            self._stream_offset = 0
+            self._place_concise_summary()
 
     def _begin_stream(self) -> None:
         """回答容器延迟到首个文本 delta 再挂载，直接接在消息流末尾。"""
@@ -328,10 +359,12 @@ class ChatStreamMixin:
             )
             chat.add_widget(role)
         md = MarkdownStatic(
-            Text(self.stream_text[self._stream_offset:] + " ▍"), classes="md"
+            Text(self.view.stream_text[self._stream_offset:] + " ▍"), classes="md"
         )
         chat.add_widget(md)
         self._stream_md = md
+        # 正文一旦出现，step 卡就跟着移到正文下方；仍在权限/选择题之前。
+        self._place_concise_summary()
 
     def _flush_stream(self) -> None:
         """节流刷新：流式阶段用纯文本渲染，结束时再一次性转成 Markdown。
@@ -342,11 +375,11 @@ class ChatStreamMixin:
             return
         self._stream_dirty = False
         if self._stream_md is not None:
-            display = self.stream_text[self._stream_offset:]
-            if len(display) > self._STREAM_TRUNCATE:
-                display = "… (earlier content hidden)\n" + display[-self._STREAM_TAIL:]
+            display = self.view.stream_text[self._stream_offset:]
+            if len(display) > _STREAM_TRUNCATE:
+                display = "… (earlier content hidden)\n" + display[-_STREAM_TAIL:]
             self._stream_md.update(Text(display + " ▍"))
-        if self.thinking:
+        if self.view.thinking:
             self._thinking_ticks += 1
             if self._thinking_ticks % 3 == 0:
                 self._update_thinking()
@@ -368,6 +401,9 @@ class ChatStreamMixin:
 
     def _append_compaction(self, summary: str, detail: str = "") -> None:
         """在聊天区标记本轮发生过上下文压缩，并展示摘要。"""
+        # 摘要是一次性结果：先收起加载行，再整块挂载，避免 spinner 与结果
+        # 同时出现在屏幕上或看起来像在逐段追加。
+        self._show_compacting(False)
         try:
             chat = self.query_one("#chat", ChatLog)
         except Exception:
@@ -376,13 +412,15 @@ class ChatStreamMixin:
         label = "↺ Context compacted"
         if detail:
             label += f" · {detail}"
-        chat.add_static(
-            Text(label, style=f"bold {theme.secondary}"),
-            classes="compaction-title",
-        )
         body = summary.strip()
+        children = [Static(Text(label, style=f"bold {theme.secondary}"),
+                           classes="compaction-title")]
         if body:
-            chat.add_widget(MarkdownStatic(body, classes="md compaction-body"))
+            children.append(
+                MarkdownStatic(body, classes="md compaction-body")
+            )
+        # 标题与摘要作为一个整体一次性挂载，避免分块出现像在流式追加。
+        chat.add_widget(Vertical(*children, classes="compaction-block"))
 
     def _make_turn_stats(
         self,

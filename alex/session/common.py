@@ -6,6 +6,8 @@ from typing import Any, Callable
 
 from pydantic import BaseModel, Field
 
+from alex.core.formatting import format_tokens as _format_tokens  # noqa: F401
+
 Emit = Callable[[str, dict[str, Any]], None]
 
 USER = "user"
@@ -51,14 +53,6 @@ class SessionError(Exception):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
-
-
-def _format_tokens(value: int) -> str:
-    if value >= 1_000_000:
-        return f"{value / 1_000_000:.1f}m"
-    if value >= 1000:
-        return f"{value / 1000:.1f}k"
-    return str(value)
 
 
 class GoalRestatement(BaseModel):

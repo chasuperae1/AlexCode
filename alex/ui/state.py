@@ -25,5 +25,5 @@ def _save_ui_state(**updates) -> None:
             json.dumps(data, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
-    except Exception:
+    except Exception:  # UI 状态写入失败不影响使用
         pass

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
 from pygments.token import Token
 from rich import box
@@ -16,8 +17,7 @@ from rich.syntax import Syntax, SyntaxTheme
 from rich.table import Table
 from rich.text import Text
 from rich.theme import Theme as RichTheme
-from textual.app import ComposeResult
-from textual.widgets import Markdown, Static
+from textual.widgets import Static
 
 from alex.ui.constants import _BOX_END, _BOX_MID, _BOX_START, _BOX_V
 
@@ -77,21 +77,32 @@ class _FullBorderMarkdown(RichMarkdown):
     elements["code_block"] = _ThemedCodeBlock
 
 
+@dataclass(frozen=True)
+class SyntaxPalette:
+    """代码块高亮用到的 8 个颜色 token。"""
+
+    background: str
+    text: str
+    key: str
+    string: str
+    number: str
+    comment: str
+    punct: str
+    error: str
+
+
 class _MarkdownSyntaxTheme(SyntaxTheme):
     """把主题 token 映射到 Rich/Pygments 的语法高亮，保持代码块底色一致。"""
 
-    def __init__(
-        self,
-        *,
-        background: str,
-        text: str,
-        key: str,
-        string: str,
-        number: str,
-        comment: str,
-        punct: str,
-        error: str,
-    ) -> None:
+    def __init__(self, palette: SyntaxPalette) -> None:
+        background = palette.background
+        text = palette.text
+        key = palette.key
+        string = palette.string
+        number = palette.number
+        comment = palette.comment
+        punct = palette.punct
+        error = palette.error
         self.background = background
 
         def tone(color: str, *, bold: bool = False, italic: bool = False) -> Style:
@@ -265,14 +276,16 @@ def _markdown_syntax_theme(app) -> _MarkdownSyntaxTheme | None:
     if not all((background, text, key, string, number, comment, punct, error)):
         return None
     return _MarkdownSyntaxTheme(
-        background=background,
-        text=text,
-        key=key,
-        string=string,
-        number=number,
-        comment=comment,
-        punct=punct,
-        error=error,
+        SyntaxPalette(
+            background=background,
+            text=text,
+            key=key,
+            string=string,
+            number=number,
+            comment=comment,
+            punct=punct,
+            error=error,
+        )
     )
 
 
@@ -361,7 +374,7 @@ class MarkdownStatic(Static):
     def on_unmount(self) -> None:
         try:
             self.app.theme_changed_signal.unsubscribe(self)
-        except Exception:
+        except Exception:  # 信号已断开时忽略
             pass
 
     def _on_theme_changed(self, theme) -> None:
@@ -386,11 +399,11 @@ class MarkdownStatic(Static):
         syntax_theme = None
         try:
             style_theme = _markdown_style_theme(self.app)
-        except Exception:
+        except Exception:  # 取不到主题样式就用默认
             pass
         try:
             syntax_theme = _markdown_syntax_theme(self.app)
-        except Exception:
+        except Exception:  # 取不到语法配色就用默认
             pass
         super().update(
             markdown_to_text(

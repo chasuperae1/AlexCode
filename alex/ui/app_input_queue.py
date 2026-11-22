@@ -2,84 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
-import json
-import re
-import sys
-import time
-from pathlib import Path
-
-import frontmatter
-from rich.console import Console
-from rich.style import Style
-from rich.text import Text
-from textual._wrap import compute_wrap_offsets
-from textual import work
-from textual.app import ComposeResult
-from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.message import Message
-from textual.screen import ModalScreen
-from textual.widgets import Collapsible, Markdown, OptionList, RichLog, Static
-from textual.widgets.option_list import Option
-
-from termui import PromptInput as TermPromptInput, TermUIApp
-
-
-def _facade():
-    """运行时取 ``alex.tui``（避免循环 import，同时让测试打桩生效）。"""
-    from alex import tui as facade
-
-    return facade
-
-from alex.screens.ask_choice import AskChoice
-from alex.daemon.client import DaemonClient, LinkError, LocalLink, ensure_daemon, prewarm_daemon
-from alex.screens.confirm import ALLOW, ALWAYS, DENY, ConfirmScreen
-from alex.config import CONFIG, ROOT, reload_config, workspace_path
-from alex.screens.diff import DiffScreen, diff_lines, parse_diff, render_diff
 from alex.screens.dir_picker import DirectoryPicker
-from alex.core.images import grab_clipboard_image, split_images
-from alex.screens.message_actions import COPY, REVERT, MessageActionsScreen
-from alex.screens.permission import PermissionScreen
-from alex.screens.picker import PickerScreen
-from alex.settings import SettingsScreen
-from alex.core.snapshots import Checkpoint
-from alex.ui.themes import DEFAULT_THEME, THEMES, next_theme, theme_label, theme_name
-from alex.ui.boot import LoadingOverlay, _gradient_banner, _hex_rgb, _render_boot_panel
-from alex.ui.constants import (
-    ASSISTANT,
-    DEBUG_KINDS,
-    LOCAL_TOOLS,
-    PROMPT_PLACEHOLDER,
-    QUEUE_CARD_LIMIT,
-    UI_STATE_PATH,
-    USER,
-    _BOOT_BANNER,
-    _BOOT_LABELS,
-    _BOOT_ORDER,
-    _BOOT_SPINNER,
-    _BOX_END,
-    _BOX_MID,
-    _BOX_START,
-    _BOX_V,
-    _IMAGE_TOKEN,
-    _TDC_MAX_LINES,
-)
-from alex.ui.markdown import MarkdownStatic, markdown_to_text, normalize_tables
-from alex.ui.panels import ChatLog, GoalCard, QueueButton, QueueCard
-from alex.ui.state import _load_ui_state, _save_ui_state
-from alex.ui.widgets import (
-    ChangesSummary,
-    InlineDiffCard,
-    PromptInput,
-    ToolDiffCard,
-    UserMessage,
-    _changes_label,
-    _changes_text,
-    _format_tokens,
-)
-
-
+from alex.ui.panels import QueueButton
+from alex.ui.widgets import InlineDiffCard, PromptInput, ToolDiffCard
 
 
 class InputQueueMixin:
@@ -116,7 +41,7 @@ class InputQueueMixin:
         self._goal_editing = True
         prompt = self.query_one("#prompt", PromptInput)
         prompt.disabled = False
-        prompt.placeholder = "修改目标后按 Enter 重新确认…"
+        prompt.placeholder = "Edit the goal and press Enter to confirm again…"
         prompt.value = str(state._payload.get("goal") or "")
         prompt.focus()
         self._refresh_meta_line()
@@ -137,7 +62,7 @@ class InputQueueMixin:
         prompt = self.query_one("#prompt", PromptInput)
         prompt.value = ""
         prompt.disabled = True
-        prompt.placeholder = "等待目标确认…"
+        prompt.placeholder = "Waiting for goal confirmation…"
         prompt.focus()
         self._refresh_meta_line()
 
@@ -165,7 +90,7 @@ class InputQueueMixin:
             # 收起后把焦点还给输入框，用户可以直接接着打字
             try:
                 self.query_one("#prompt", PromptInput).focus()
-            except Exception:
+            except Exception:  # 输入框未挂载时忽略
                 pass
             return
         if self._ask_widget is not None:
@@ -181,7 +106,7 @@ class InputQueueMixin:
                 prompt = self.query_one("#prompt", PromptInput)
                 prompt.value = ""
                 prompt.disabled = True
-                prompt.placeholder = "等待目标确认…"
+                prompt.placeholder = "Waiting for goal confirmation…"
                 self._refresh_meta_line()
             elif self.link is not None:
                 self.run_worker(self._goal_rpc("goal_cancel"), exclusive=False)

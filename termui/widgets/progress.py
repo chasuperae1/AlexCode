@@ -10,7 +10,8 @@ from textual.binding import Binding
 from textual.reactive import reactive
 from textual.widget import Widget
 
-_SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+from .spinner import SPINNER_FRAMES as _SPINNER
+
 _BLOCKS = " ▏▎▍▌▋▊▉█"
 
 

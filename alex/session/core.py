@@ -4,42 +4,26 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
-import time
-import uuid
-from copy import deepcopy
 from dataclasses import asdict
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from pydantic import BaseModel, Field
 
 from alex.config import (
     CONFIG,
-    LOCKED_SKILLS,
-    ROOT,
-    lock_skill_files,
     project_path,
     reload_config,
-    save_config,
     workspace_path,
 )
-from alex.core.images import build_user_message, display_text
-from alex.core import reasoning
-from alex.core.snapshots import Checkpoint, SnapshotError, SnapshotStore, now_label
+from alex.core.images import display_text
+from alex.core.snapshots import Checkpoint, SnapshotStore
 
 from alex.session.common import (
     ASSISTANT,
     BOOT_STAGES,
-    DEFAULT_WELCOME,
     Emit,
-    GOAL_RESTATEMENT_PROMPT,
-    GoalRestatement,
-    READONLY_TOOLS,
     SessionError,
     USER,
-    _format_tokens,
 )
 
 
@@ -93,6 +77,8 @@ class CoreMixin(BootMixin):
         self._progress_state: dict[str, str] = {"text": "", "tone": "primary"}
         self._pending_confirm: dict[str, Any] | None = None
         self._pending_future: asyncio.Future | None = None
+        # shell 权限卡在 history 里的位置：换主题 / 重开 TUI 后据此重建
+        self._shell_card_index: int | None = None
         # 并行子代理可能同时请求确认：串行化为一次一个
         self._confirm_lock = asyncio.Lock()
         self._pending_ask: dict[str, Any] | None = None
@@ -140,47 +126,128 @@ class CoreMixin(BootMixin):
                 history.append((role, text))
         return history[-40:]
 
+    def _history_file(self) -> Path:
+        """显示用历史（含卡片的顺序）落盘位置，和 agent 状态文件放在一起。"""
+        path = project_path("session_file")
+        return path.with_suffix(".history.json")
+
+    def _save_history(self) -> None:
+        """保存完整显示历史：重启后 shell 卡、步骤摘要不会只剩问答。"""
+        try:
+            path = self._history_file()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            items = []
+            for kind, text in self.history[-400:]:
+                if len(text) > 20000:
+                    text = text[:20000] + "…"
+                items.append([kind, text])
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(
+                json.dumps({"version": 1, "history": items}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            tmp.replace(path)
+        except OSError:  # 历史落盘失败不阻断对话
+            pass
+
+    def _load_history(self) -> list[tuple[str, str]] | None:
+        try:
+            path = self._history_file()
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        items = data.get("history") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            return None
+        history: list[tuple[str, str]] = []
+        for item in items:
+            if not isinstance(item, (list, tuple)) or len(item) != 2:
+                continue
+            history.append((str(item[0]), str(item[1])))
+        return history
+
+    def _restore_history(
+        self, fallback: list[tuple[str, str]]
+    ) -> list[tuple[str, str]]:
+        """用用户原话对齐保存的显示历史，避免撤销/压缩后错位。
+
+        显示历史里会有多段中间 assistant 文本、ask、shell 卡等，agent state
+        的 context 通常只有最终消息；不能再按 assistant 数量逐条比对，否则
+        一有中间文本就会误判为“对不上”，把卡片历史整份丢掉。
+        """
+        saved = self._load_history()
+        if not saved:
+            return fallback
+        state_users = [
+            text.strip() for kind, text in fallback if kind == USER
+        ]
+        saved_users = [
+            text.strip() for kind, text in saved if kind == USER
+        ]
+        if not state_users:
+            # state 没有可对齐的对话，但显示历史存在（例如杀进程时刚收尾），
+            # 保留已落盘的卡片与文本。
+            return saved[-400:]
+        if len(saved_users) < len(state_users):
+            return fallback
+        if saved_users[-len(state_users):] != state_users:
+            return fallback
+        return saved[-400:]
+
+    def _clear_history_file(self) -> None:
+        try:
+            self._history_file().unlink(missing_ok=True)
+        except OSError:  # 历史文件不存在或已删除
+            pass
+
+    async def _stop_queue_task(self) -> None:
+        """停止队列任务：先放行等待确认的 future，再取消并等待退出。"""
+        task = self._queue_task
+        if task is None or task.done():
+            return
+        self._queue_stop = True
+        decision = self._queue_decision
+        if decision is not None and not decision.done():
+            decision.set_result("cancel")
+        await self._cancel_task(task)
+
+    @staticmethod
+    async def _cancel_task(task) -> None:
+        """取消后台任务并等待其退出；取消与异常都属收尾预期。"""
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:  # 取消任务属收尾预期
+            pass
+        except Exception:  # 任务退出异常不影响关闭
+            pass
+
     async def close(self) -> None:
         """保存会话并释放子进程；忙碌时不落盘。"""
         if self._closed:
             return
         self._closed = True
-        if self._queue_task is not None and not self._queue_task.done():
-            self._queue_stop = True
-            if self._queue_decision is not None and not self._queue_decision.done():
-                self._queue_decision.set_result("cancel")
-            self._queue_task.cancel()
-            try:
-                await self._queue_task
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                pass
+        await self._stop_queue_task()
         if self._reply_task is not None and not self._reply_task.done():
-            self._reply_task.cancel()
-            try:
-                await self._reply_task
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                pass
+            await self._cancel_task(self._reply_task)
         if self._backend is not None:
             try:
                 await self._backend.kill_all()
-            except Exception:
+            except Exception:  # 清理子进程失败不影响退出
                 pass
         if self.agent is not None and not self._busy:
             from alex.core.agent import save_state
 
             try:
                 save_state(self.agent.state)
-            except Exception:
+                self._save_history()
+            except Exception:  # 尽力保存；失败不阻断关闭
                 pass
         for client in self.mcps:
             try:
                 if client.is_stateful and client.is_connected:
                     await client.close()
-            except Exception:
+            except Exception:  # MCP 连接关闭失败可忽略
                 pass
 
     @property
@@ -293,6 +360,7 @@ class CoreMixin(BootMixin):
         self._exchange_seq += 1
         exchange_id = self._exchange_seq
         self.history.append((USER, display))
+        self._save_history()
         self.emit(
             "exchange_start",
             {"exchange_id": exchange_id, "text": display},
@@ -305,7 +373,7 @@ class CoreMixin(BootMixin):
     async def _wait_ready(self, timeout: float = 180.0) -> None:
         try:
             await asyncio.wait_for(self._ready.wait(), timeout)
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError:  # 等就绪超时后照常继续，后续步骤各自报错
             pass
 
     async def _rebuild_agent(self) -> None:

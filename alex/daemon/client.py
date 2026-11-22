@@ -168,46 +168,59 @@ class DaemonClient:
         try:
             while True:
                 message = await read_line(self._reader)
-                if message is None:
+                if message is None or not self._handle_message(message):
                     break
-                kind = message.get("type")
-                if kind == MSG_EVENT:
-                    seq = int(message.get("seq", -1))
-                    if seq <= self._last_seq:
-                        continue
-                    self._last_seq = seq
-                    self._dispatch(
-                        str(message.get("event_type", "")), message.get("data") or {}
-                    )
-                elif kind == "rpc_result":
-                    future = self._pending.pop(message.get("id"), None)
-                    if future is not None and not future.done():
-                        if message.get("ok"):
-                            future.set_result(message.get("result"))
-                        else:
-                            error = message.get("error") or {}
-                            future.set_exception(
-                                LinkError(
-                                    f"{error.get('code', 'error')}: "
-                                    f"{error.get('message', '')}"
-                                )
-                            )
-                elif kind == MSG_BYE:
-                    break
-        except asyncio.CancelledError:
+        except asyncio.CancelledError:  # 读循环被取消属正常关闭
             pass
         except (OSError, ValueError) as exc:
             print(f"[alex] daemon link ended: {exc!r}", file=sys.stderr)
         except Exception as exc:
             print(f"[alex] daemon link crashed: {exc!r}", file=sys.stderr)
         finally:
-            self._closed = True
-            for future in self._pending.values():
-                if not future.done():
-                    future.set_exception(LinkError("connection closed"))
-            self._pending.clear()
-            if self._close_handler is not None:
-                self._close_handler()
+            self._close_link()
+
+    def _handle_message(self, message: dict) -> bool:
+        """分发一条 daemon 消息；返回 False 表示读循环该结束了。"""
+        kind = message.get("type")
+        if kind == MSG_EVENT:
+            self._apply_event(message)
+        elif kind == "rpc_result":
+            self._resolve_rpc(message)
+        elif kind == MSG_BYE:
+            return False
+        return True
+
+    def _apply_event(self, message: dict) -> None:
+        seq = int(message.get("seq", -1))
+        if seq <= self._last_seq:
+            return
+        self._last_seq = seq
+        self._dispatch(
+            str(message.get("event_type", "")), message.get("data") or {}
+        )
+
+    def _resolve_rpc(self, message: dict) -> None:
+        future = self._pending.pop(message.get("id"), None)
+        if future is None or future.done():
+            return
+        if message.get("ok"):
+            future.set_result(message.get("result"))
+            return
+        error = message.get("error") or {}
+        future.set_exception(
+            LinkError(
+                f"{error.get('code', 'error')}: {error.get('message', '')}"
+            )
+        )
+
+    def _close_link(self) -> None:
+        self._closed = True
+        for future in self._pending.values():
+            if not future.done():
+                future.set_exception(LinkError("connection closed"))
+        self._pending.clear()
+        if self._close_handler is not None:
+            self._close_handler()
 
     async def rpc(self, method: str, **params: Any) -> Any:
         if self._closed:
@@ -239,14 +252,14 @@ class DaemonClient:
             self._reader_task.cancel()
             try:
                 await self._reader_task
-            except asyncio.CancelledError:
+            except asyncio.CancelledError:  # 取消后台读任务，异常属正常收尾
                 pass
-            except Exception:
+            except Exception:  # 读任务退出异常不影响关闭
                 pass
         try:
             self._writer.close()
             await self._writer.wait_closed()
-        except Exception:
+        except Exception:  # 连接已断开，关闭失败可忽略
             pass
 
 
@@ -328,20 +341,20 @@ async def _retire_daemon(info: SessionInfo) -> None:
         )
         await writer.drain()
         await asyncio.wait_for(read_line(reader), 3)
-    except Exception:
-        pass
+    except Exception as exc:  # 旧 daemon 无握手响应：继续走强制结束分支
+        print(f"[alex] retire handshake failed: {exc!r}", file=sys.stderr)
     finally:
         if writer is not None:
             writer.close()
             try:
                 await writer.wait_closed()
-            except Exception:
+            except Exception:  # 旧连接关闭失败不影响退役流程
                 pass
     # 旧 daemon 若已卡死在协议层，优雅退出拿不到响应，直接结束进程
     if _pid_alive(info.pid):
         try:
             os.kill(info.pid, signal.SIGTERM)
-        except OSError:
+        except OSError:  # 进程已提前退出
             pass
         for _ in range(20):
             if not _pid_alive(info.pid):
@@ -361,8 +374,8 @@ async def ensure_daemon(
     if info is not None:
         try:
             return await DaemonClient.connect(info)
-        except LinkError:
-            pass
+        except LinkError as exc:  # 旧 daemon 已连不上：记一笔后拉起新的
+            print(f"[alex] reconnect failed, spawning daemon: {exc!r}", file=sys.stderr)
 
     _spawn_daemon(root)
     deadline = time.monotonic() + timeout

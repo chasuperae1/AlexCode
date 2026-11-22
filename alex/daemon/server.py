@@ -77,7 +77,7 @@ class _Client:
         self.closed = True
         try:
             self.writer.close()
-        except Exception:
+        except Exception:  # 连接已断开，关闭异常可忽略
             pass
 
 
@@ -129,14 +129,14 @@ class Daemon:
                 writer = client.writer
                 if writer.transport and writer.transport.get_write_buffer_size() > 0:
                     asyncio.ensure_future(self._drain_client(writer))
-            except Exception:
+            except Exception:  # transport 状态异常时跳过 drain
                 pass
 
     @staticmethod
     async def _drain_client(writer: asyncio.StreamWriter) -> None:
         try:
             await writer.drain()
-        except (OSError, ConnectionError):
+        except (OSError, ConnectionError):  # 客户端已断开，drain 失败可忽略
             pass
 
     def _write_log(self, message: dict[str, Any]) -> None:
@@ -153,8 +153,8 @@ class Daemon:
             return
         try:
             await asyncio.to_thread(self._sync_write_log, line)
-        except Exception:
-            pass
+        except Exception as exc:  # 事件日志写失败不阻断会话，记进 daemon 日志
+            print(f"[alex] event log write failed: {exc!r}", file=sys.stderr)
 
     def _sync_write_log(self, line: str) -> None:
         if self._log_file is None:
@@ -191,18 +191,21 @@ class Daemon:
         # 清理必须能在有限时间内结束，否则关窗口后 daemon 会残留
         try:
             await asyncio.wait_for(self.session.close(), timeout=10)
-        except (asyncio.TimeoutError, Exception):
-            pass
+        except Exception as exc:  # 清理超时不能让 daemon 残留，记日志后继续退出
+            print(f"[alex] session close on shutdown failed: {exc!r}", file=sys.stderr)
         if self._server is not None:
             self._server.close()
             try:
                 await asyncio.wait_for(self._server.wait_closed(), timeout=3)
-            except (asyncio.TimeoutError, Exception):
-                pass
+            except Exception as exc:  # 关监听超时同样继续退出
+                print(
+                    f"[alex] server close on shutdown failed: {exc!r}",
+                    file=sys.stderr,
+                )
         if self._log_file is not None:
             try:
                 self._log_file.close()
-            except Exception:
+            except Exception:  # 日志文件关闭失败不影响退出
                 pass
         if self.info is not None:
             clear_session_file(self.root / "data" / "daemon.json", pid=os.getpid())
@@ -252,13 +255,13 @@ class Daemon:
                 if message is None:
                     break
                 await self._handle_message(client, message)
-        except (OSError, ValueError, asyncio.CancelledError):
+        except (OSError, ValueError, asyncio.CancelledError):  # 客户端断开或协议错误：结束该连接即可
             pass
         finally:
             try:
                 if client in self._clients:
                     self._clients.remove(client)
-            except Exception:
+            except Exception:  # 列表里已没有该客户端
                 pass
             client.close()
             self._maybe_exit()
@@ -332,7 +335,7 @@ class Daemon:
             if self._log_file is not None:
                 try:
                     self._log_file.close()
-                except Exception:
+                except Exception:  # 关闭日志失败不影响退出
                     pass
             if self.info is not None:
                 clear_session_file(
@@ -380,7 +383,7 @@ def main(argv: list[str] | None = None) -> None:
     daemon = Daemon(root)
     try:
         asyncio.run(daemon.run())
-    except KeyboardInterrupt:
+    except KeyboardInterrupt:  # Ctrl+C 退出属正常
         pass
 
 

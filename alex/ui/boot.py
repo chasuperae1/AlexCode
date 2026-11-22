@@ -7,7 +7,7 @@ from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.widgets import Static
 
-from alex.ui.constants import _BOOT_BANNER, _BOOT_LABELS, _BOOT_ORDER, _BOOT_SPINNER
+from alex.ui.constants import _BOOT_BANNER, _BOOT_SPINNER
 
 
 def _hex_rgb(value: str) -> tuple[int, int, int] | None:

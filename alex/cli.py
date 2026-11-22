@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import re
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import agentscope
 from agentscope.message import UserMsg
@@ -96,7 +98,27 @@ async def _run_goal(agent, model, backend, text: str) -> str:
     return final_text
 
 
-async def main() -> None:
+@dataclass
+class _Runtime:
+    """REPL 运行期对象：模型、工作区后端、MCP、权限闸门与当前 agent。"""
+
+    model: Any
+    backend: TrackedLocalBackend
+    mcps: list
+    gate: PermissionGate
+    agent: Any
+    toolkit: Any
+    restored: bool = False
+
+    async def rebuild(self) -> None:
+        """按当前工作区 / 权限配置重建 agent 与工具列表。"""
+        self.agent, self.toolkit, _ = await build_agent(
+            self.model, self.backend, self.mcps, gate=self.gate, ask=_terminal_ask
+        )
+
+
+async def _bootstrap() -> _Runtime:
+    """解析运行参数：模型、工作区后端、MCP、权限闸门，并建好首个 agent。"""
     agentscope.setup_logger("WARNING")
     model = build_model()
     backend = TrackedLocalBackend(workdir=str(workspace_path(create=True)))
@@ -105,127 +127,174 @@ async def main() -> None:
     agent, toolkit, restored = await build_agent(
         model, backend, mcps, gate=gate, ask=_terminal_ask
     )
+    return _Runtime(
+        model=model,
+        backend=backend,
+        mcps=mcps,
+        gate=gate,
+        agent=agent,
+        toolkit=toolkit,
+        restored=restored,
+    )
 
-    if restored:
+
+async def _print_banner(runtime: _Runtime) -> None:
+    if runtime.restored:
         print(f"Restored the previous session ({CONFIG['session_file']}).")
     print(
         f"Alex is ready: model {CONFIG['model']['name']}, "
-        f"{len(await toolkit.get_tool_schemas())} tools, "
-        f"{len(mcps)} MCP servers, permission {CONFIG['permission_mode']}."
+        f"{len(await runtime.toolkit.get_tool_schemas())} tools, "
+        f"{len(runtime.mcps)} MCP servers, permission {CONFIG['permission_mode']}."
     )
     print("Type a message to chat; /clear resets memory; /help for help; /exit to quit.")
 
+
+async def _cmd_exit(runtime: _Runtime, arg: str) -> bool:
+    return True
+
+
+async def _cmd_help(runtime: _Runtime, arg: str) -> bool:
+    print(
+        "/cd [path] changes the workspace; /permission "
+        "accept|bypass|explore; /goal run until an independent "
+        "verifier passes it; /init memory clears all "
+        "memory; /clear resets the session; /exit quits.\n"
+    )
+    return False
+
+
+async def _cmd_init(runtime: _Runtime, arg: str) -> bool:
+    if arg.lower() != "memory":
+        print("Usage: /init memory\n")
+        return False
+    middleware = find_memory_middleware(runtime.agent)
+    if middleware is not None:
+        await middleware.clear()
+    else:
+        await asyncio.to_thread(clear_memory, str(ROOT), CONFIG["memory_dir"])
+    print("Memory cleared.\n")
+    return False
+
+
+async def _cmd_cd(runtime: _Runtime, arg: str) -> bool:
+    if not arg:
+        print(f"Workspace: {workspace_path()}\n")
+        return False
+    target = Path(arg).expanduser()
+    if not target.is_absolute():
+        target = workspace_path() / target
+    try:
+        target = target.resolve()
+        target.mkdir(parents=True, exist_ok=True)
+        if not target.is_dir():
+            raise NotADirectoryError(target)
+    except OSError as exc:
+        print(f"Cannot use workspace: {exc}\n")
+        return False
+    CONFIG["workdir"] = str(target)
+    save_config()
+    save_state(runtime.agent.state)
+    runtime.backend = TrackedLocalBackend(workdir=str(target))
+    await runtime.rebuild()
+    print(f"Workspace: {target}\n")
+    return False
+
+
+async def _cmd_permission(runtime: _Runtime, arg: str) -> bool:
+    current = CONFIG.get("permission_mode", "accept")
+    if not arg:
+        print(f"Permission: {current}. Modes: {', '.join(MODE_NAMES)}\n")
+        return False
+    mode = arg.lower()
+    if mode not in MODE_NAMES:
+        print(f"Unknown mode {mode}; use {', '.join(MODE_NAMES)}\n")
+        return False
+    CONFIG["permission_mode"] = mode
+    save_config()
+    runtime.agent.state.permission_context.mode = resolve_permission_mode(mode)
+    print(f"Permission mode: {mode}\n")
+    return False
+
+
+async def _cmd_goal(runtime: _Runtime, arg: str) -> bool:
+    if not arg:
+        print("Usage: /goal <what must be achieved>\n")
+        return False
+    try:
+        answer = await _run_goal(runtime.agent, runtime.model, runtime.backend, arg)
+    except Exception as exc:
+        print(f"Goal failed: {exc}\n")
+        return False
+    print(f"Alex: {answer}\n")
+    save_state(runtime.agent.state)
+    return False
+
+
+async def _cmd_clear(runtime: _Runtime, arg: str) -> bool:
+    path = project_path("session_file")
+    if path.is_file():
+        path.unlink()
+    await runtime.rebuild()
+    print("Memory cleared; starting a new session.\n")
+    return False
+
+
+_COMMANDS = {
+    "/exit": _cmd_exit,
+    "/quit": _cmd_exit,
+    "/help": _cmd_help,
+    "/init": _cmd_init,
+    "/cd": _cmd_cd,
+    "/permission": _cmd_permission,
+    "/goal": _cmd_goal,
+    "/clear": _cmd_clear,
+}
+
+
+async def _dispatch_command(runtime: _Runtime, raw: str) -> bool:
+    """分发斜杠命令；返回 True 表示应当退出 REPL。"""
+    command, _, arg = raw.partition(" ")
+    handler = _COMMANDS.get(command.lower())
+    if handler is None:
+        print("Unknown command. Type /help for help.\n")
+        return False
+    return bool(await handler(runtime, arg.strip()))
+
+
+async def _repl(runtime: _Runtime) -> None:
     while True:
         try:
             user_input = input("You: ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
-            break
+            return
         if not user_input:
             continue
         if user_input.startswith("/"):
-            command, _, arg = user_input.partition(" ")
-            command = command.lower()
-            arg = arg.strip()
-            if command in {"/exit", "/quit"}:
-                break
-            if command == "/help":
-                print(
-                    "/cd [path] changes the workspace; /permission "
-                    "accept|bypass|explore; /goal run until an independent "
-                    "verifier passes it; /init memory clears all "
-                    "memory; /clear resets the session; /exit quits.\n"
-                )
-                continue
-            if command == "/init":
-                if arg.lower() != "memory":
-                    print("Usage: /init memory\n")
-                    continue
-                middleware = find_memory_middleware(agent)
-                if middleware is not None:
-                    await middleware.clear()
-                else:
-                    await asyncio.to_thread(
-                        clear_memory, str(ROOT), CONFIG["memory_dir"]
-                    )
-                print("Memory cleared.\n")
-                continue
-            if command == "/cd":
-                if not arg:
-                    print(f"Workspace: {workspace_path()}\n")
-                    continue
-                target = Path(arg).expanduser()
-                if not target.is_absolute():
-                    target = workspace_path() / target
-                try:
-                    target = target.resolve()
-                    target.mkdir(parents=True, exist_ok=True)
-                    if not target.is_dir():
-                        raise NotADirectoryError(target)
-                except OSError as exc:
-                    print(f"Cannot use workspace: {exc}\n")
-                    continue
-                CONFIG["workdir"] = str(target)
-                save_config()
-                save_state(agent.state)
-                backend = TrackedLocalBackend(workdir=str(target))
-                agent, toolkit, _ = await build_agent(
-                    model, backend, mcps, gate=gate, ask=_terminal_ask
-                )
-                print(f"Workspace: {target}\n")
-                continue
-            if command == "/permission":
-                current = CONFIG.get("permission_mode", "accept")
-                if not arg:
-                    print(
-                        f"Permission: {current}. Modes: "
-                        f"{', '.join(MODE_NAMES)}\n"
-                    )
-                    continue
-                mode = arg.lower()
-                if mode not in MODE_NAMES:
-                    print(f"Unknown mode {mode}; use {', '.join(MODE_NAMES)}\n")
-                    continue
-                CONFIG["permission_mode"] = mode
-                save_config()
-                agent.state.permission_context.mode = resolve_permission_mode(
-                    mode
-                )
-                print(f"Permission mode: {mode}\n")
-                continue
-            if command == "/goal":
-                if not arg:
-                    print("Usage: /goal <what must be achieved>\n")
-                    continue
-                try:
-                    answer = await _run_goal(agent, model, backend, arg)
-                except Exception as exc:
-                    print(f"Goal failed: {exc}\n")
-                    continue
-                print(f"Alex: {answer}\n")
-                save_state(agent.state)
-                continue
-            if command == "/clear":
-                path = project_path("session_file")
-                if path.is_file():
-                    path.unlink()
-                agent, toolkit, _ = await build_agent(
-                    model, backend, mcps, gate=gate, ask=_terminal_ask
-                )
-                print("Memory cleared; starting a new session.\n")
-                continue
-            print("Unknown command. Type /help for help.\n")
+            if await _dispatch_command(runtime, user_input):
+                return
             continue
 
-        reply = await agent.reply(UserMsg(name="user", content=user_input))
+        reply = await runtime.agent.reply(
+            UserMsg(name="user", content=user_input)
+        )
         print(f"Alex: {reply.get_text_content()}\n")
-        save_state(agent.state)
+        save_state(runtime.agent.state)
 
-    save_state(agent.state)
-    for client in mcps:
+
+async def _shutdown(runtime: _Runtime) -> None:
+    save_state(runtime.agent.state)
+    for client in runtime.mcps:
         if client.is_stateful and client.is_connected:
             await client.close()
     print("Session saved.")
+
+
+async def main() -> None:
+    runtime = await _bootstrap()
+    await _print_banner(runtime)
+    await _repl(runtime)
+    await _shutdown(runtime)
 
 
 if __name__ == "__main__":

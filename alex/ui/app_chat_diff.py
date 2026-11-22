@@ -2,84 +2,23 @@
 
 from __future__ import annotations
 
-import asyncio
-import json
-import re
-import sys
 import time
 from pathlib import Path
 
-import frontmatter
-from rich.console import Console
-from rich.style import Style
 from rich.text import Text
-from textual._wrap import compute_wrap_offsets
-from textual import work
-from textual.app import ComposeResult
-from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.message import Message
-from textual.screen import ModalScreen
-from textual.widgets import Collapsible, OptionList, RichLog, Static
-from textual.widgets.option_list import Option
 
-from termui import PromptInput as TermPromptInput, TermUIApp
-
-from alex.screens.ask_choice import AskChoice
-from alex.daemon.client import DaemonClient, LinkError, LocalLink, ensure_daemon, prewarm_daemon
-from alex.screens.confirm import ALLOW, ALWAYS, DENY, ConfirmScreen
-from alex.config import CONFIG, ROOT, reload_config, workspace_path
-from alex.screens.diff import DiffScreen, diff_lines, parse_diff, render_diff
-from alex.screens.dir_picker import DirectoryPicker
-from alex.core.images import grab_clipboard_image, split_images
-from alex.screens.message_actions import COPY, REVERT, MessageActionsScreen
-from alex.screens.permission import PermissionScreen
-from alex.screens.picker import PickerScreen
-from alex.settings import SettingsScreen
+from alex.config import workspace_path
 from alex.core.snapshots import Checkpoint
-from alex.ui.themes import DEFAULT_THEME, THEMES, next_theme, theme_label, theme_name
-from alex.ui.boot import LoadingOverlay, _gradient_banner, _hex_rgb, _render_boot_panel
-from alex.ui.constants import (
-    ASSISTANT,
-    DEBUG_KINDS,
-    LOCAL_TOOLS,
-    PROMPT_PLACEHOLDER,
-    QUEUE_CARD_LIMIT,
-    UI_STATE_PATH,
-    USER,
-    _BOOT_BANNER,
-    _BOOT_LABELS,
-    _BOOT_ORDER,
-    _BOOT_SPINNER,
-    _BOX_END,
-    _BOX_MID,
-    _BOX_START,
-    _BOX_V,
-    _IMAGE_TOKEN,
-    _TDC_MAX_LINES,
-)
-from alex.ui.markdown import MarkdownStatic, markdown_to_text, normalize_tables
-from alex.ui.files import (
-    Attachment,
-    FileAttachmentCard,
-    copy_file_to_clipboard,
-    open_file,
-    split_file_links,
-)
-from alex.ui.panels import ChatLog, ConciseSummary, GoalCard, QueueButton, QueueCard
-from alex.ui.sources import format_bytes
-from alex.ui.state import _load_ui_state, _save_ui_state
+from alex.screens.diff import DiffScreen, diff_lines, parse_diff
+from alex.screens.message_actions import REVERT
+from alex.ui.activity import SHELL_TOOLS
+from alex.ui.panels import ChatLog
 from alex.ui.widgets import (
     ChangesSummary,
     InlineDiffCard,
-    PromptInput,
+    ShellPermissionCard,
     ToolDiffCard,
-    UserMessage,
-    _changes_label,
-    _changes_text,
-    _format_tokens,
 )
-
 
 
 class ChatDiffMixin:
@@ -116,16 +55,21 @@ class ChatDiffMixin:
     def _append_tool_diff(self, data: dict) -> None:
         """把单次 Edit / Write 的 diff 立刻挂到聊天流末尾。"""
         permission = getattr(self, "_permission_card", None)
-        name = str(data.get("name") or "").lower()
+        raw_name = str(data.get("name") or "")
+        name = raw_name.lower()
         if permission is not None and permission.tool_name.lower() == name:
             # 权限卡已经展示过这次改动的预览；完成后原地转成普通 diff 卡，
             # 不再追加第二张，否则同一次写入会出现两层相同 diff。
+            # shell 卡不产生 diff，收成一行结果即可，也不计入本轮 diff 卡。
             permission.finish(data)
             self._permission_card = None
-            self._turn_diff_cards += 1
+            if getattr(permission, "finishes_as_diff", True):
+                self._turn_diff_cards += 1
             return
         diff_text = str(data.get("diff") or "")
         if not diff_text:
+            if not self._concise and raw_name in SHELL_TOOLS:
+                self._append_shell_result_card(data)
             return
         try:
             files = parse_diff(diff_text)
@@ -141,7 +85,8 @@ class ChatDiffMixin:
         deletions = sum(item.deletions for item in files)
         path = files[0].path or "(unknown)"
         if len(files) > 1:
-            path = f"{path}  +{len(files) - 1} 个文件"
+            extra = len(files) - 1
+            path = f"{path}  +{extra} more file{'s' if extra != 1 else ''}"
         if self._concise:
             card = self._concise_card_widget()
             if card is not None:
@@ -162,6 +107,37 @@ class ChatDiffMixin:
             )
         )
         self._turn_diff_cards += 1
+
+    def _append_shell_result_card(self, data: dict) -> None:
+        """开发者模式下，没有权限卡时也给 shell 留一张带输出的完成卡。"""
+        try:
+            chat = self._chat()
+        except Exception:
+            return
+        ok = bool(data.get("ok", True))
+        stdout = str(data.get("stdout") or "")
+        payload = {
+            "tool": str(data.get("name") or "Shell"),
+            "command": str(data.get("command") or ""),
+            "cwd": self._workspace or str(workspace_path()),
+            "allow_always": False,
+            "readonly": True,
+            "result_text": str(data.get("text") or ""),
+            "exit_code": int(data.get("exit_code", 0 if ok else 1) or 0),
+            "stdout": stdout,
+        }
+        card = ShellPermissionCard(
+            payload,
+            self.current_theme,
+            lambda *_args: None,
+        )
+        card.set_state("done" if ok else "failed")
+        card.set_output(
+            stdout,
+            exit_code=payload["exit_code"],
+            failed=not ok,
+        )
+        chat.add_widget(card)
 
     async def _load_inline_diff(
         self,
@@ -227,7 +203,7 @@ class ChatDiffMixin:
         card.set_lines(lines)
 
     def _checkpoint_for(self, exchange_id: int) -> Checkpoint | None:
-        for checkpoint in self._checkpoints:
+        for checkpoint in self.view.checkpoints:
             if checkpoint.exchange_id == exchange_id:
                 return checkpoint
         return None

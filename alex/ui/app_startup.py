@@ -3,85 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-import json
-import re
-import sys
-import time
-from pathlib import Path
 
-import frontmatter
-from rich.console import Console
-from rich.style import Style
-from rich.text import Text
-from textual._wrap import compute_wrap_offsets
-from textual import work
-from textual.app import ComposeResult
-from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.message import Message
-from textual.screen import ModalScreen
-from textual.widgets import Collapsible, Markdown, OptionList, RichLog, Static
-from textual.widgets.option_list import Option
-
-from termui import PromptInput as TermPromptInput, TermUIApp
-
-
-def _facade():
-    """运行时取 ``alex.tui``：
-
-    这些模块由 tui.py 导入，模块级 import 会形成循环；同时测试是在
-    facade 上打桩（``tui.ensure_daemon`` 等），只有经由 facade 解析才生效。
-    """
-    from alex import tui as facade
-
-    return facade
-
-from alex.screens.ask_choice import AskChoice
-from alex.daemon.client import DaemonClient, LinkError, LocalLink, ensure_daemon, prewarm_daemon
-from alex.screens.confirm import ALLOW, ALWAYS, DENY, ConfirmScreen
-from alex.config import CONFIG, ROOT, reload_config, workspace_path
-from alex.screens.diff import DiffScreen, diff_lines, parse_diff, render_diff
-from alex.screens.dir_picker import DirectoryPicker
-from alex.core.images import grab_clipboard_image, split_images
-from alex.screens.message_actions import COPY, REVERT, MessageActionsScreen
-from alex.screens.permission import PermissionScreen
-from alex.screens.picker import PickerScreen
-from alex.settings import SettingsScreen
-from alex.core.snapshots import Checkpoint
-from alex.ui.themes import DEFAULT_THEME, THEMES, next_theme, theme_label, theme_name
-from alex.ui.boot import LoadingOverlay, _gradient_banner, _hex_rgb, _render_boot_panel
-from alex.ui.constants import (
-    ASSISTANT,
-    DEBUG_KINDS,
-    LOCAL_TOOLS,
-    PROMPT_PLACEHOLDER,
-    QUEUE_CARD_LIMIT,
-    UI_STATE_PATH,
-    USER,
-    _BOOT_BANNER,
-    _BOOT_LABELS,
-    _BOOT_ORDER,
-    _BOOT_SPINNER,
-    _BOX_END,
-    _BOX_MID,
-    _BOX_START,
-    _BOX_V,
-    _IMAGE_TOKEN,
-    _TDC_MAX_LINES,
-)
-from alex.ui.markdown import MarkdownStatic, markdown_to_text, normalize_tables
-from alex.ui.panels import ChatLog, GoalCard, QueueButton, QueueCard
-from alex.ui.state import _load_ui_state, _save_ui_state
-from alex.ui.widgets import (
-    ChangesSummary,
-    InlineDiffCard,
-    PromptInput,
-    ToolDiffCard,
-    UserMessage,
-    _changes_label,
-    _changes_text,
-    _format_tokens,
-)
+from alex.config import ROOT
+from alex.daemon.client import DaemonClient, LinkError, LocalLink
+from alex.ui.boot import LoadingOverlay
+from alex.ui.constants import _BOOT_LABELS, _BOOT_ORDER
+from alex.ui.facade import _facade
+from alex.ui.widgets import PromptInput
 
 
 class StartupMixin:
@@ -112,7 +40,7 @@ class StartupMixin:
             self.query_one("#loading", LoadingOverlay).update_stages(
                 stages, self._boot_frame
             )
-        except Exception:
+        except Exception:  # 遮罩已卸载时停止更新
             pass
 
     def _hide_loading(self) -> None:
@@ -121,7 +49,7 @@ class StartupMixin:
         self._loading_visible = False
         try:
             self.query_one("#loading", LoadingOverlay).remove()
-        except Exception:
+        except Exception:  # 遮罩已卸载
             pass
 
     async def _initialize(self) -> None:
@@ -154,7 +82,7 @@ class StartupMixin:
         self._hide_loading()
         try:
             self.query_one("#prompt", PromptInput).disabled = False
-        except Exception:
+        except Exception:  # 输入框未挂载时忽略
             pass
         self.notify(
             f"Init failed: {message}", title="Init failed", severity="error", timeout=10
@@ -185,7 +113,7 @@ class StartupMixin:
         if isinstance(old, DaemonClient):
             try:
                 await old.close()
-            except Exception:
+            except Exception:  # 旧连接关闭失败不影响重连
                 pass
         try:
             self.link = await _facade().ensure_daemon(ROOT)

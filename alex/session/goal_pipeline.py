@@ -4,45 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 import time
-import uuid
-from copy import deepcopy
-from dataclasses import asdict
-from datetime import datetime
-from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
-from pydantic import BaseModel, Field
 
-from alex.config import (
-    CONFIG,
-    LOCKED_SKILLS,
-    ROOT,
-    lock_skill_files,
-    project_path,
-    reload_config,
-    save_config,
-    workspace_path,
-)
-from alex.core.images import build_user_message, display_text
-from alex.core import reasoning
-from alex.core.snapshots import Checkpoint, SnapshotError, SnapshotStore, now_label
 
-from alex.session.clarify_rules import needs_clarification
 from alex.session.common import (
-    ASSISTANT,
-    BOOT_STAGES,
-    DEFAULT_WELCOME,
-    Emit,
-    GOAL_INTERVIEW_PROMPT,
     GOAL_RESTATEMENT_PROMPT,
-    GoalInterview,
     GoalRestatement,
-    READONLY_TOOLS,
     SessionError,
-    USER,
-    _format_tokens,
 )
 
 
@@ -53,12 +23,12 @@ class GoalPipelineMixin:
     def _clarify_value(answer: dict[str, Any]) -> str:
         """把一道选择题的回答压成 brief 里的一个值。"""
         if answer.get("skipped"):
-            return "未选择"
+            return "Not selected"
         other = str(answer.get("other") or "").strip()
         choices = [str(item) for item in (answer.get("choices") or []) if str(item)]
         if other and choices:
-            return "、".join(choices) + f"（{other}）"
-        return other or ("、".join(choices) if choices else "未选择")
+            return ", ".join(choices) + f" ({other})"
+        return other or (", ".join(choices) if choices else "Not selected")
 
     async def goal_confirm(self) -> dict[str, Any]:
         """确认目标并开始执行。"""
@@ -151,9 +121,9 @@ class GoalPipelineMixin:
             try:
                 task.cancel()
                 await task
-            except asyncio.CancelledError:
+            except asyncio.CancelledError:  # 取消 goal 任务，CancelledError 属预期
                 pass
-            except Exception:
+            except Exception:  # goal 任务退出异常不影响取消
                 pass
             finally:
                 self._stopping = False

@@ -5,86 +5,49 @@
 
 from __future__ import annotations
 
-import asyncio
-import json
-import re
 import sys
-import time
 from pathlib import Path
 
-import frontmatter
-from rich.console import Console
-from rich.style import Style
-from rich.text import Text
-from textual._wrap import compute_wrap_offsets
-from textual import work
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.message import Message
-from textual.screen import ModalScreen
-from textual.widgets import Collapsible, Markdown, OptionList, RichLog, Static
-from textual.widgets.option_list import Option
+from textual.containers import Horizontal, Vertical
+from textual.widgets import OptionList, Static
 
-from termui import PromptInput as TermPromptInput, TermUIApp
+from termui import TermUIApp
+from termui.widgets import SPINNER_FRAMES
 
-from alex.screens.ask_choice import AskChoice
-from alex.daemon.client import DaemonClient, LinkError, LocalLink, ensure_daemon, prewarm_daemon
-from alex.screens.confirm import ALLOW, ALWAYS, DENY, ConfirmScreen
-from alex.config import CONFIG, ROOT, reload_config, workspace_path
-from alex.screens.diff import DiffScreen, diff_lines, parse_diff, render_diff
-from alex.screens.dir_picker import DirectoryPicker
-from alex.core.images import grab_clipboard_image, split_images
-from alex.screens.message_actions import COPY, REVERT, MessageActionsScreen
-from alex.screens.permission import PermissionScreen
-from alex.screens.picker import PickerScreen
-from alex.settings import SettingsScreen
-from alex.core.snapshots import Checkpoint
-from alex.ui.themes import DEFAULT_THEME, THEMES, next_theme, theme_label, theme_name
-from alex.ui.sources import SourceState, load_sources
+from alex.config import CONFIG, ROOT, workspace_path
+from alex.core.snapshots import SnapshotStore
 from alex.ui.activity import ActivityTracker
-
 from alex.ui.app_chat import ChatMixin
 from alex.ui.app_chrome import ChromeMixin
 from alex.ui.app_events import EventsMixin
 from alex.ui.app_input import InputMixin
 from alex.ui.app_startup import StartupMixin
 from alex.ui.app_style import APP_CSS
-from alex.ui.boot import LoadingOverlay, _gradient_banner, _hex_rgb, _render_boot_panel
-from alex.ui.constants import (
-    ASSISTANT,
-    DEBUG_KINDS,
-    LOCAL_TOOLS,
-    PROMPT_PLACEHOLDER,
-    QUEUE_CARD_LIMIT,
-    UI_STATE_PATH,
-    USER,
-    _BOOT_BANNER,
-    _BOOT_LABELS,
-    _BOOT_ORDER,
-    _BOOT_SPINNER,
-    _BOX_END,
-    _BOX_MID,
-    _BOX_START,
-    _BOX_V,
-    _IMAGE_TOKEN,
-    _TDC_MAX_LINES,
-)
-from alex.ui.markdown import MarkdownStatic, markdown_to_text, normalize_tables
-from alex.ui.files import FileAttachmentCard
-from alex.ui.panels import ChatLog, GoalCard, QueueButton, QueueCard
-from alex.ui.state import _load_ui_state, _save_ui_state
-from alex.ui.widgets import (
+from alex.ui.boot import LoadingOverlay
+from alex.ui.constants import ASSISTANT, PROMPT_PLACEHOLDER, USER  # noqa: F401
+from alex.ui.panels import ChatLog, GoalCard, QueueCard
+from alex.ui.sources import SourceState, load_sources
+from alex.ui.state import _load_ui_state
+from alex.ui.themes import DEFAULT_THEME, THEMES
+from alex.ui.view_state import ChatViewState
+from alex.ui.widgets import PromptInput
+
+# 以下符号不再被 tui.py 直接使用，但仍是 ``alex.tui`` 的公开导入面：
+# 测试通过 ``monkeypatch.setattr(tui, ...)`` 打桩，UI mixin 经 facade 读取。
+from textual.widgets import Collapsible  # noqa: F401
+from alex.core.images import grab_clipboard_image  # noqa: F401
+from alex.daemon.client import LinkError, ensure_daemon, prewarm_daemon  # noqa: F401
+from alex.screens.ask_choice import AskChoice  # noqa: F401
+from alex.screens.message_actions import MessageActionsScreen  # noqa: F401
+from alex.settings import SettingsScreen  # noqa: F401
+from alex.ui.markdown import MarkdownStatic, markdown_to_text  # noqa: F401
+from alex.ui.widgets import (  # noqa: F401
     ChangesSummary,
     InlineDiffCard,
-    PromptInput,
     ToolDiffCard,
-    UserMessage,
-    _changes_label,
-    _changes_text,
-    _format_tokens,
 )
-
 
 
 class AlexApp(StartupMixin, EventsMixin, ChatMixin, ChromeMixin, InputMixin, TermUIApp):
@@ -137,33 +100,49 @@ class AlexApp(StartupMixin, EventsMixin, ChatMixin, ChromeMixin, InputMixin, Ter
 
     def __init__(self) -> None:
         super().__init__()
-        self.history: list[tuple[str, str]] = []
-        self.stream_text = ""
-        self.thinking = ""
+        self._init_stream_state()
+        self._init_runtime_state()
+        self._init_interaction_state()
+        self._init_queue_goal_state()
+        self._init_settings_state()
+
+    def _init_stream_state(self) -> None:
+        # 会话状态的界面投影：历史、流式正文、思考与快照
+        self.view = ChatViewState()
         self._tool_args: dict[str, str] = {}
         self._tool_names: dict[str, str] = {}
         self._stream_dirty = False
         self._thinking_ticks = 0
         self._stream_md = None
+
         # 当前正文块从 stream_text 的哪个位置开始（回答选择题后另起一块）
         self._stream_offset = 0
+
         # 本轮是否收到过正文增量（没有时在结束时用全文兜底）
         self._turn_text_streamed = False
+
         # 本轮已经挂出的工具级 diff 卡片数量，用来避免结束时再重复一张整轮大卡
         self._turn_diff_cards = 0
-        # 交互区显示模式：developer 逐条展开 / concise 整轮收进一行摘要
-        self._display_mode = (
-            "concise"
-            if str(_load_ui_state().get("display_mode") or "") == "concise"
-            else "developer"
-        )
+
         # 简洁模式下当前这一轮的汇总卡
         self._concise_card = None
+
         # 思考独立折叠：每段思考一个 Collapsible；工具与子代理按顺序单行追加
         self._thinking_box = None
         self._thinking_static = None
         self._thinking_started = 0.0
         self._tool_rows: dict[str, Static] = {}
+
+        # history_reset 未携带 checkpoints 时，等紧随其后的 checkpoints 事件再补渲染
+        self._history_needs_checkpoints = False
+        self._spinner_index = 0
+        self._spinner_frames = SPINNER_FRAMES
+
+        # 性能优化：缓存与节流
+        self._chat_ref: ChatLog | None = None  # 缓存 ChatLog 引用
+        self._live_runs = ActivityTracker()
+
+    def _init_runtime_state(self) -> None:
         self.agent = None
         self.toolkit = None
         self.mcps = []
@@ -171,40 +150,44 @@ class AlexApp(StartupMixin, EventsMixin, ChatMixin, ChromeMixin, InputMixin, Ter
         self.link = None
         self._no_daemon = False
         self._busy = False
-        self._boot: dict[str, dict[str, str]] = {
-            "daemon": {
-                "label": "Background daemon",
-                "status": "idle",
-                "detail": "",
-            }
-        }
-        self._boot_frame = 0
-        self._loading_visible = True
+        self._backend = None
+
+        # 权限门在后台初始化时创建（其依赖链约 2s，不想挡住首屏）
+        self._permission_gate = None
+        self._snapshots: SnapshotStore | None = None
+        self._snapshot_warned = False
+        self._meta_base = ""
+        self._workspace = str(workspace_path())  # 跟随 daemon 推送实时更新
+        self._sources: SourceState = load_sources()
+
+    def _init_interaction_state(self) -> None:
         self._confirm_screen = None
         self._confirm_request_id = ""
         self._confirm_resolved = False
         self._confirm_future = None
         self._permission_card = None
+        self._permission_payload = None
         self._permission_pending = False
         self._ask_widget = None
         self._ask_request_id = ""
+        self._ask_payload: dict | None = None
+        self._live_tool_data: dict[str, dict] = {}
         self._compacting_line = None
         self._palette_visible = False
         self._palette_matches: list[tuple[str, str]] = []
         self._activity = ""
         self._reply_worker = None
-        self._backend = None
-        # 权限门在后台初始化时创建（其依赖链约 2s，不想挡住首屏）
-        self._permission_gate = None
-        self._snapshots: SnapshotStore | None = None
-        self._checkpoints: list[Checkpoint] = []
-        self._snapshot_warned = False
         self._rewinding = False
-        self._exchange_seq = 0
         self._stop_armed = False
         self._stop_timer = None
         self._activity_before_stop = ""
         self._stopping = False
+
+        # 粘贴的截图：占位符 -> 本地文件
+        self._pasted_images: dict[str, Path] = {}
+        self._paste_seq = 0
+
+    def _init_queue_goal_state(self) -> None:
         self._queue_confirming = False
         self._queue_armed = False
         self._queue_total = 0
@@ -214,22 +197,32 @@ class AlexApp(StartupMixin, EventsMixin, ChatMixin, ChromeMixin, InputMixin, Ter
         self._goal_editing = False
         self._goal_phase = ""
         self._verifier_mode = False
-        self._meta_base = ""
-        self._workspace = str(workspace_path())  # 跟随 daemon 推送实时更新
-        self._spinner_index = 0
-        self._spinner_frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-        # 粘贴的截图：占位符 -> 本地文件
-        self._pasted_images: dict[str, Path] = {}
-        self._paste_seq = 0
+
+    def _init_settings_state(self) -> None:
+        # 交互区显示模式：developer 逐条展开 / concise 整轮收进一行摘要
+        self._display_mode = (
+            "concise"
+            if str(_load_ui_state().get("display_mode") or "") == "concise"
+            else "developer"
+        )
+
+        self._boot: dict[str, dict[str, str]] = {
+            "daemon": {
+                "label": "Background daemon",
+                "status": "idle",
+                "detail": "",
+            }
+        }
+
+        self._boot_frame = 0
+        self._loading_visible = True
+
         # 设置页数据预取缓存
         self._settings_cache: dict | None = None
         self._model_catalog: dict[str, dict] = {}
         self._settings_spinner_frame = 0
         self._settings_spinner_timer = None
-        # 性能优化：缓存与节流
-        self._chat_ref: ChatLog | None = None  # 缓存 ChatLog 引用
-        self._sources: SourceState = load_sources()
-        self._live_runs = ActivityTracker()
+
 
     # ------------------------------------------------------------------ 布局
     def compose(self) -> ComposeResult:
@@ -272,154 +265,6 @@ class AlexApp(StartupMixin, EventsMixin, ChatMixin, ChromeMixin, InputMixin, Ter
         self._refresh_meta_line()
         self._refresh_loading()
         self.run_worker(self._initialize(), exclusive=True)
-
-
-
-
-
-
-
-
-
-    # ---------------------------------------------------------------- 事件驱动
-
-
-
-
-    # ------------------------------------------------------------ 选择题提问
-
-
-
-
-
-
-
-
-
-
-    # ------------------------------------------------------------------ 渲染
-
-
-
-
-
-
-
-
-
-
-
-    # ---------------------------------------------------------- 思考 / 工具行
-
-
-
-
-
-
-
-
-
-
-
-    _STREAM_TRUNCATE = 5000
-    _STREAM_TAIL = 3000
-
-
-
-
-
-
-
-
-
-
-    # ------------------------------------------------------------ 目标进度
-
-
-
-
-
-
-    # ------------------------------------------------------------ 上下文统计
-
-
-
-
-
-
-
-    # ------------------------------------------------------------ 命令补全
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    # ------------------------------------------------------------ 队列确认
-
-
-
-
-
-
-
-    # ------------------------------------------------------------------ 对话
-
-    # ------------------------------------------------------------------ 截图
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def _acquire_instance_lock():

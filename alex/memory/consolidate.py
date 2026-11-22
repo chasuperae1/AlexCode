@@ -4,22 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import re
-import shutil
 import time
-from collections.abc import AsyncGenerator, Awaitable, Callable
 from datetime import datetime, timedelta
-from pathlib import Path
-from typing import Literal
 
-from pydantic import BaseModel, Field
 
 from agentscope.agent import Agent
-from agentscope.message import Msg, SystemMsg, UserMsg
-from agentscope.middleware import MiddlewareBase
+from agentscope.message import SystemMsg, UserMsg
 
-from alex.memory.models import Lesson, _CONSOLIDATION_LOCK, _CuratedMemory, _LessonList, logger
+from alex.memory.models import _CONSOLIDATION_LOCK, _CuratedMemory, logger
 
 
 class ConsolidateMixin:
