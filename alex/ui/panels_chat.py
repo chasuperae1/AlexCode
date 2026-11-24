@@ -127,6 +127,7 @@ class CompactionBlock(Vertical):
         self._title.update(text)
         if has_body:
             self._body.display = not self._collapsed
+        self.set_class(not self._collapsed, "-expanded")
 
 
 class ChatLog(VerticalScroll):
@@ -198,17 +199,27 @@ class ChatLog(VerticalScroll):
         text-style: underline;
     }
     ChatLog .compaction-title {
-        margin-top: 1;
+        padding: 0 1;
         color: $secondary;
         text-style: bold;
     }
     ChatLog .compaction-block {
         width: 1fr;
         height: auto;
+        margin: 1 0 0 0;
+        padding: 0 1;
+        border: round $secondary 25%;
+    }
+    ChatLog .compaction-block.-expanded {
+        border: round $secondary 45%;
+    }
+    ChatLog .compaction-block:hover,
+    ChatLog .compaction-block:focus {
+        border: round $secondary 65%;
     }
     ChatLog .compaction-body {
-        border-left: thick $secondary 40%;
-        padding-left: 1;
+        padding: 0 1 1 1;
+        margin: 0 0 0 0;
     }
     ChatLog .turn-stats {
         background: $background;
