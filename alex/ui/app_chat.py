@@ -108,18 +108,28 @@ class ChatMixin(ChatStreamMixin, ChatDiffMixin):
             widgets.append(Static(line, classes="ask-history"))
         return widgets
 
+    def _markdown_widget(self, content: str, classes: str = "md"):
+        """历史重建时按已知宽度先把这块 Markdown 排好，其余场景保持挂载后再排。"""
+        width = int(getattr(self, "_md_build_width", 0) or 0)
+        return MarkdownStatic(
+            content,
+            classes=classes,
+            app=self if width > 0 else None,
+            width=width if width > 0 else 0,
+        )
+
     def _assistant_content_widgets(self, content: str) -> list:
         """把回答里的文件链接换成附件卡，其余文字仍走 Markdown。"""
         parts = split_file_links(content)
         if not any(isinstance(part, Attachment) for part in parts):
-            return [MarkdownStatic(content, classes="md")] if content else []
+            return [self._markdown_widget(content)] if content else []
         widgets: list = []
         for part in parts:
             if isinstance(part, Attachment):
                 widgets.append(FileAttachmentCard(part, self.current_theme))
                 continue
             if part.strip():
-                widgets.append(MarkdownStatic(part, classes="md"))
+                widgets.append(self._markdown_widget(part))
         return widgets
 
     def _render_stream_segment(self, content: str) -> None:
@@ -136,7 +146,7 @@ class ChatMixin(ChatStreamMixin, ChatDiffMixin):
             if isinstance(part, Attachment):
                 widgets.append(FileAttachmentCard(part, self.current_theme))
             elif part.strip():
-                widgets.append(MarkdownStatic(part, classes="md"))
+                widgets.append(self._markdown_widget(part))
         parent = md.parent
         if parent is not None and widgets:
             parent.mount_all(widgets, before=md)

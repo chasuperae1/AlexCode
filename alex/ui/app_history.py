@@ -131,7 +131,9 @@ class HistoryMixin:
         at_bottom = chat.is_vertical_scroll_end or chat._follow_timer is not None
         anchor = int(chat.scroll_y)
         # 正在翻旧窗口时，当前回合的实时卡/流式块不属于这个区间。
-        at_tail = end >= len(self.view.history)
+        # 尾部窗口的判定看“是否跟随最新”，不能只看 end：前插页的 end 也可能
+        # 正好等于总数，但视口其实停在旧内容中间。
+        at_tail = self._window_start is None
         live_summary = (
             self._concise_card_widget() if self._concise and at_tail else None
         )
@@ -144,7 +146,11 @@ class HistoryMixin:
         thinking_started = float(getattr(self, "_thinking_started", 0.0) or 0.0)
         self._reset_history_view()
         chat._suspend_scroll = True
-        chat.clear(keep=keep)
+        # 聊天区宽度此时已经确定：让历史里的 Markdown 块在构造阶段就按它排版，
+        # 新一页挂上来的第一帧就有正文，不会先出现一排空块再逐块填字。
+        self._md_build_width = int(
+            body.content_region.width or body.size.width or 0
+        )
 
         checkpoint_by_user, remaining = _align_checkpoints(
             self.view.history, self.view.checkpoints
@@ -158,6 +164,10 @@ class HistoryMixin:
         )
         self._build_history(build, checkpoint_by_user, start=start, end=end)
         self._insert_window_edges(build, start, end, len(self.view.history))
+        # 新一页先在旧内容还挂在屏上的时候构造完，再一次性换掉。
+        # 反过来（先 clear 再 build）会让聊天区在新控件就绪前空上一帧甚至几帧，
+        # 用户看到的就是整块白闪。
+        chat.clear(keep=keep)
         if live_summary_state is not None:
             # 当前用户回合里，一个内部 reply 可能产生多个 checkpoint，历史回放
             # 会各生成一张 step 卡；而界面上本来只有一张实时卡。重建时把本回合
@@ -184,6 +194,7 @@ class HistoryMixin:
             thinking_started=thinking_started,
             live=at_tail,
         )
+        self._md_build_width = 0
         if build.concise and keep is not None:
             summary = self._concise_card_widget()
             tool = str((keep._payload or {}).get("tool") or "")
@@ -224,8 +235,9 @@ class HistoryMixin:
             if self._window_end is not None
             else forward_end(history, start)
         )
-        # 会话被撤销/清空或窗口已经追上尾部：回到跟随最新。
-        if start >= total or end >= total:
+        # 会话被撤销/清空，或窗口起点已经落进尾屏：回到跟随最新。
+        # 注意 end 可能正好等于 total（前插页还没裁掉尾部），不能因此判定为尾屏。
+        if start >= total or start >= tail_start(history):
             self._window_start = None
             self._window_end = None
             return tail_start(history), total
@@ -259,10 +271,18 @@ class HistoryMixin:
             )
 
     def load_earlier_history(self) -> None:
-        """把窗口整体换成当前窗口之前的一页（相邻，不重叠）。"""
+        """把上一页插到现有窗口上方，并让眼前正在读的内容保持不动。
+
+        之前是整屏换一页：内容全换、视口回到页底，读者会丢掉正在看的位置。
+        现在改成“前插”：新一页挂在现有内容之前，再按插入高度补偿滚动偏移，
+        屏幕上的那段话位置不变；视口以下的旧内容随后裁掉，换成新的
+        “Load newer” 入口，活跃控件数量依旧有上限。
+        """
         history = self.view.history
         if not history:
             return
+        chat = self.query_one("#chat", ChatLog)
+        body = chat.query_one("#chat-body")
         current = (
             self._window_start
             if self._window_start is not None
@@ -273,13 +293,85 @@ class HistoryMixin:
         new_start = earlier_start(history, current, PAGE_UNITS)
         if new_start >= current:
             return
+        old_end = self._window_end if self._window_end is not None else len(history)
+        height_before = body.virtual_size.height
+
+        # 新页先在旧内容旁边构造好（Markdown 预排版），再整体前插。
+        self._md_build_width = int(body.content_region.width or body.size.width or 0)
+        checkpoint_by_user, remaining = _align_checkpoints(
+            history, self.view.checkpoints
+        )
+        build = _HistoryBuild(
+            theme=self.current_theme,
+            concise=self._concise,
+            remaining=remaining,
+            changes_exchanges=_changes_exchanges(history),
+        )
+        self._build_history(build, checkpoint_by_user, start=new_start, end=current)
+        self._md_build_width = 0
+
+        # 旧的“↑ Load earlier”摘掉，换成指向新起点的一行，避免叠两行。
+        for edge in list(chat.query(WindowEdge)):
+            if edge.direction == "earlier":
+                edge.remove()
+        head = WindowEdge(f"↑ Load earlier · {new_start} in history", "earlier")
+        first = body.children[0] if body.children else None
+        chat._suspend_scroll = True
+        body.mount_all([head, *build.widgets], before=first)
+        chat._suspend_scroll = False
         self._window_start = new_start
-        self._window_end = current
-        self._render_history()
-        chat = self.query_one("#chat", ChatLog)
-        # 一页有一百多个 Markdown 块，高度要好几帧才稳定；跟随时间给足，
-        # 否则会停在页中间，底部的 “Load newer” 行直接落在视野外。
-        chat.follow_bottom()
+        self._window_end = old_end
+
+        # 用“插进去的那一页有多高”来补偿滚动：新控件的高度要等一帧布局完才
+        # 算出来，所以读不到变化就下一帧再来，最多重试几帧。
+        scroll_before = chat.scroll_y
+
+        def settle(retries: int = 3) -> None:
+            added = body.virtual_size.height - height_before
+            if added <= 0 and retries > 0:
+                chat.call_after_refresh(lambda: settle(retries - 1))
+                return
+            if added > 0:
+                chat.scroll_y = scroll_before + added
+            # 滚动稳定后再按最终位置裁掉屏幕外的内容。
+            chat.call_after_refresh(
+                lambda: self._trim_prepended(chat, body, new_start)
+            )
+
+        chat.call_after_refresh(settle)
+
+    def _trim_prepended(self, chat: ChatLog, body, start: int) -> None:
+        """裁掉视口以下、已经读过的旧尾部内容，换成新的“Load newer”入口。
+
+        裁的是屏幕外的控件，读者眼前的内容不动。
+        """
+        history = self.view.history
+        view_bottom = chat.region.y + chat.region.height
+
+        # 1) 视口以下的尾部：换成新的“Load newer”入口。
+        cut = forward_end(history, start, PAGE_UNITS + 10)
+        dropped = False
+        for widget in list(body.children):
+            index = getattr(widget, "_history_index", None)
+            if index is None or index < cut:
+                continue
+            # 还看得见的内容不能裁，否则眼前的字会消失；留给下一次翻页。
+            if widget.region.y < view_bottom:
+                continue
+            widget.remove()
+            dropped = True
+        if dropped:
+            self._window_end = cut
+            for edge in chat.query(WindowEdge):
+                if edge.direction == "newer":
+                    edge.remove()
+            remaining = len(history) - cut
+            if remaining > 0:
+                body.mount(WindowEdge(f"↓ Load newer · {remaining} later", "newer"))
+
+        # 2) 视口以上的内容不裁：那是用户刚载入、还没读到的页；
+        # 回最新或重新渲染时会整体收回窗口。
+
 
     def load_newer_history(self) -> None:
         """往后翻一页；追上尾部时回到跟随最新。"""
@@ -378,6 +470,7 @@ class HistoryMixin:
         index = start
         while index < end:
             kind, content = items[index]
+            mark = len(build.widgets)
             if kind in ("rule", "skill"):
                 # 来源已由顶部 Rules 行 / 摘要卡统一呈现，旧历史里的公告行不再重复
                 build.last_kind = kind
@@ -397,6 +490,9 @@ class HistoryMixin:
                 self._history_user_entry(build, index, content, checkpoint_by_user)
             else:
                 self._history_reply_entry(build, kind, content)
+            # 记下来源记录下标：向上翻页时按它精确裁掉视口外的尾部控件。
+            for widget in build.widgets[mark:]:
+                widget._history_index = index
             build.last_kind = kind
             index += 1
         if build.concise:

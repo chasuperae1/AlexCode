@@ -349,12 +349,19 @@ def markdown_to_text(
 
 
 class MarkdownStatic(Static):
-    """Markdown 文本块：渲染为 ``Text``，可直接选中复制；流式阶段接收 ``Text``。"""
+    """Markdown 文本块：渲染为 ``Text``，可直接选中复制；流式阶段接收 ``Text``。
 
-    def __init__(self, renderable="", **kwargs) -> None:
+    ``width`` 用于历史重建：此时控件还没挂载、拿不到 ``content_region``，
+    但聊天区宽度已经确定，提前按这个宽度排好版，挂上去的第一帧就有正文，
+    不会出现“整块空白再慢慢填字”的闪烁。
+    """
+
+    def __init__(self, renderable="", *, app=None, width: int = 0, **kwargs) -> None:
         super().__init__(Text(""), **kwargs)
         self._markdown: str | None = None
         self._render_width = -1
+        self._host_app = app
+        self._hint_width = int(width or 0)
         self.update(renderable)
 
     def update(self, renderable="", **kwargs) -> None:
@@ -368,7 +375,9 @@ class MarkdownStatic(Static):
 
     def on_mount(self) -> None:
         self.app.theme_changed_signal.subscribe(self, self._on_theme_changed)
-        self._render_width = -1
+        # 已经按历史重建时的宽度排好版就不要重排一遍，宽度不变时渲染结果相同。
+        if self._render_width <= 0:
+            self._render_width = -1
         self._render_markdown()
         # 刚挂载时 content_region 还是 0，拿不到宽度就只画出一个空行；
         # 挂在滚动容器末尾的块（新消息、翻回最新）随后尺寸恰好不变，
@@ -402,17 +411,26 @@ class MarkdownStatic(Static):
             return
         if width is None:
             width = self.content_region.width or self.size.width
+        if width <= 0:
+            # 还没布局：历史重建时用已知的聊天区宽度先排好，别的场景保持原行为。
+            width = self._hint_width
         if width <= 0 or width == self._render_width:
             return
         self._render_width = width
+        host = self._host_app
+        if host is None:
+            try:
+                host = self.app
+            except Exception:
+                host = None
         style_theme = None
         syntax_theme = None
         try:
-            style_theme = _markdown_style_theme(self.app)
+            style_theme = _markdown_style_theme(host)
         except Exception:  # 取不到主题样式就用默认
             pass
         try:
-            syntax_theme = _markdown_syntax_theme(self.app)
+            syntax_theme = _markdown_syntax_theme(host)
         except Exception:  # 取不到语法配色就用默认
             pass
         super().update(
