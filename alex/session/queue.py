@@ -18,7 +18,7 @@ class QueueMixin:
     """任务队列：入队、逐条执行、确认/取消、卡片更新。"""
 
     async def queue(self, text: str) -> dict[str, Any]:
-        """拆成互不依赖的任务并串行执行；立即返回，进度用事件推送。"""
+        """拆成有序任务并串行执行；任务之间可以前后依赖。立即返回，进度用事件推送。"""
         await self._wait_ready(timeout=30)
         if self.agent is None:
             raise SessionError("not_ready", "session is not ready")
@@ -62,16 +62,15 @@ class QueueMixin:
     async def _prepare_queue(
         self, text: str, before: set[str]
     ) -> tuple[list[Any], int, float] | None:
-        """让模型把请求拆成独立任务，并等用户确认；不需要执行时返回 None。"""
+        """让模型把请求拆成有序任务，并等用户确认；不需要执行时返回 None。"""
         plan = (
-            "Plan a queue of small, independent tasks for the request "
-            "below.\n\n"
+            "Plan a queue of small tasks for the request below.\n\n"
             "Rules:\n"
-            "- If any task needs another task's output or completion "
-            "first, do NOT call TaskCreate. Explain the dependency and "
-            "ask the user to run the tasks one at a time.\n"
-            "- Otherwise call TaskCreate once per task, in execution "
-            "order.\n"
+            "- Always call TaskCreate once per task, in the order they "
+            "should run. Never refuse to plan just because one step builds "
+            "on an earlier one: the queue runs tasks strictly one after "
+            "another, so a later task already has the earlier output.\n"
+            "- Split the work so each task can be finished in one reply.\n"
             "- Do not start any task now.\n\n"
             f"Request:\n{text}"
         )
@@ -89,8 +88,8 @@ class QueueMixin:
         ]
         if not new_tasks:
             self._notice(
-                "Queue not started — the tasks depend on each other. "
-                "Run them one at a time.",
+                "Queue not started — the plan came back empty. "
+                "Try /queue again, or send the request as a normal prompt.",
                 title="Queue",
                 severity="warning",
                 timeout=8,
@@ -98,6 +97,12 @@ class QueueMixin:
             return None
 
         total = len(new_tasks)
+        # 队列本身就是串行：模型顺手写上的 blocked_by 一律拆掉，
+        # 否则任务栏会显示成“被依赖阻塞”，而队列其实照样按顺序跑。
+        ids = {task.id for task in new_tasks}
+        for task in new_tasks:
+            task.blocked_by = [item for item in task.blocked_by if item not in ids]
+            task.blocks = [item for item in task.blocks if item not in ids]
         self._queue_total = total
         self._queue_subjects = [task.subject for task in new_tasks]
         self._queue_task_ids = [task.id for task in new_tasks]

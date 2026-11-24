@@ -65,7 +65,7 @@ class AlexApp(StartupMixin, EventsMixin, ChatMixin, ChromeMixin, InputMixin, Ter
         ("/reload", "Reload config and tools"),
         ("/image", "Send an image file"),
         ("/compact", "Compress the context now"),
-        ("/queue", "Run independent tasks in sequence"),
+        ("/queue", "Split the request into tasks, run them in order"),
         ("/goal", "Run until the goal passes verification"),
         ("/clear", "Clear the session"),
         ("/theme", "Choose the theme"),

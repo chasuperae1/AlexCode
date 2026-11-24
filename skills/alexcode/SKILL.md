@@ -43,7 +43,7 @@ description: AlexCode 的功能说明书：TUI 命令与快捷键、模型与思
 | `/theme` | 切换主题（也可 `Ctrl+T`） |
 | `/reload` | 重载配置、技能、规则、MCP 与模型 |
 | `/compact` | 手动压缩上下文 |
-| `/queue` | 串行执行多个独立任务，如 `/queue 任务A; 任务B` |
+| `/queue` | 把请求拆成多个任务并串行执行，如 `/queue 任务A; 任务B` |
 | `/goal` | 目标模式：执行者与独立验收者循环，直到目标通过校验 |
 | `/image` | 发送图片，如 `/image <路径> [说明]` |
 | `/init memory` | 清空长期记忆 |

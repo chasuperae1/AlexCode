@@ -113,7 +113,7 @@ class InputCommandMixin:
             " · click a change summary to view its diff"
             " · /reload reload config · /clear clear session · /theme choose theme"
             " · /compact compress context"
-            " · /queue run independent tasks in order"
+            " · /queue split the request into tasks, run them in order"
             " · /goal work until an independent verifier passes it"
             " · Shift+Enter newline · /exit quit",
             severity="warning",
