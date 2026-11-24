@@ -24,6 +24,7 @@ from alex.session.common import (
     Emit,
     SessionError,
     USER,
+    record_payload,
 )
 
 
@@ -48,6 +49,10 @@ class CoreMixin(BootMixin):
         self._checkpoints: list[Checkpoint] = []
         self._revert: dict | None = None
         self._exchange_seq = 0
+        # 压缩记录的唯一序号：重连回放同一段压缩时按 segment_id 覆盖
+        self._compact_seq = 0
+        # 当前这轮回答是否来自 goal 流水线的验收者
+        self._verifier_reply = False
         self._busy = False
         self._activity = ""
         self._stopping = False
@@ -150,6 +155,23 @@ class CoreMixin(BootMixin):
         except OSError:  # 历史落盘失败不阻断对话
             pass
 
+    def _record_compaction(self, summary: str, detail: str = "") -> None:
+        """记一条压缩卡：先进显示历史再广播，重建后卡片位置与文案不变。"""
+        payload = {
+            "summary": summary,
+            "detail": detail,
+            "segment_id": f"c{self._compact_seq}",
+        }
+        self._compact_seq += 1
+        self.history.append(
+            ("compaction", json.dumps(payload, ensure_ascii=False))
+        )
+        self._save_history()
+        self.emit(
+            "compaction",
+            {**payload, **record_payload("compaction", payload)},
+        )
+
     def _load_history(self) -> list[tuple[str, str]] | None:
         try:
             path = self._history_file()
@@ -187,12 +209,15 @@ class CoreMixin(BootMixin):
         if not state_users:
             # state 没有可对齐的对话，但显示历史存在（例如杀进程时刚收尾），
             # 保留已落盘的卡片与文本。
-            return saved[-400:]
-        if len(saved_users) < len(state_users):
+            return saved
+        # 落盘的显示历史里有卡片/步骤行时它是权威版本：对不上只可能是交接
+        # 侧的偏差，退回 state 派生的纯文本会把 step 行整批丢掉且不可恢复。
+        rich = any(kind not in (USER, ASSISTANT) for kind, _ in saved)
+        if len(saved_users) < len(state_users) or saved_users[-len(state_users):] != state_users:
+            if rich:
+                return saved
             return fallback
-        if saved_users[-len(state_users):] != state_users:
-            return fallback
-        return saved[-400:]
+        return saved
 
     def _clear_history_file(self) -> None:
         try:
@@ -287,8 +312,11 @@ class CoreMixin(BootMixin):
         }
 
     def _history_payload(self) -> list[list[str]]:
-        """限制单条文本与总条数，避免快照超过单行传输上限。"""
-        items = self.history[-400:]
+        """把显示历史打包成快照字段。
+
+        单条文本仍然截断，避免快照超过单行传输上限。
+        """
+        items = self.history
         payload: list[list[str]] = []
         for kind, text in items:
             if len(text) > 20000:
@@ -444,5 +472,6 @@ class CoreMixin(BootMixin):
                 "timeout": timeout,
             },
         )
+
 
 

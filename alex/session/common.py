@@ -14,6 +14,12 @@ USER = "user"
 
 ASSISTANT = "assistant"
 
+
+def record_payload(kind: str, payload: Any) -> dict[str, Any]:
+    """事件附带的历史记录：界面只按 ``record`` 写入，不再自行猜测内容。"""
+    return {"record": [kind, payload]}
+
+
 DEFAULT_WELCOME = (
     "Hi. I can read and write files, run commands, and manage tasks. "
     "Give me a task to start."

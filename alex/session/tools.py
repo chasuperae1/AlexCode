@@ -18,6 +18,7 @@ from alex.config import (
 
 from alex.session.common import (
     SessionError,
+    record_payload,
 )
 
 # 与 alex.ui.activity.SHELL_TOOLS 保持一致；这里不引 UI 模块，避免会话层依赖界面
@@ -126,6 +127,15 @@ class ToolsMixin:
         self._shell_card_index = len(self.history)
         self.history.append(("shell_card", json.dumps(entry, ensure_ascii=False)))
         self._save_history()
+        self._emit_shell_card(entry)
+
+    def _emit_shell_card(self, entry: dict[str, Any]) -> None:
+        """推送 shell 卡的最新状态；record 让界面按同一份内容写历史。"""
+        payload = dict(entry)
+        self.emit(
+            "shell_card",
+            {**payload, **record_payload("shell_card", payload)},
+        )
 
     def _finish_shell_card(
         self,
@@ -179,6 +189,7 @@ class ToolsMixin:
                 ("shell_card", json.dumps(entry, ensure_ascii=False))
             )
             self._save_history()
+            self._emit_shell_card(entry)
             return True
         if entry.get("state") == "denied":
             # 用户拒绝后命令没有执行，结果事件不能把 denied 覆盖成 failed
@@ -194,6 +205,7 @@ class ToolsMixin:
         )
         self._shell_card_index = None
         self._save_history()
+        self._emit_shell_card(entry)
         return True
 
     async def confirm(self, request_id: str, choice: str) -> None:
@@ -281,15 +293,23 @@ class ToolsMixin:
             # 用户主动停止（interrupt）才丢弃问题；daemon 退出/重启导致的中断
             # 要保留落盘文件，新进程启动后才能恢复
             keep_pending = not self._stopping
+            summary = "Cancelled"
+            record: dict[str, Any] = {}
+            if not keep_pending:
+                # 界面上这张卡会收起成 “Cancelled”，历史也要留同一行
+                self.history.append(("ask", summary))
+                self._save_history()
+                record = record_payload("ask", summary)
             self.emit(
                 "ask_end",
                 {
                     "request_id": request_id,
-                    "summary": "Cancelled",
+                    "summary": summary,
                     "skipped": True,
                     "choices": [],
                     "other": "",
                     "question": payload.get("question", ""),
+                    **record,
                 },
             )
             raise
@@ -311,6 +331,7 @@ class ToolsMixin:
                 "choices": answer.get("choices", []),
                 "other": answer.get("other", ""),
                 "question": payload.get("question", ""),
+                **record_payload("ask", summary),
             },
         )
         return answer
@@ -371,6 +392,7 @@ class ToolsMixin:
                 "choices": answer.get("choices", []),
                 "other": answer.get("other", ""),
                 "question": payload.get("question", ""),
+                **record_payload("ask", summary),
             },
         )
         if self._stopping or self.agent is None or self._busy:

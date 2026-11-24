@@ -370,6 +370,10 @@ class MarkdownStatic(Static):
         self.app.theme_changed_signal.subscribe(self, self._on_theme_changed)
         self._render_width = -1
         self._render_markdown()
+        # 刚挂载时 content_region 还是 0，拿不到宽度就只画出一个空行；
+        # 挂在滚动容器末尾的块（新消息、翻回最新）随后尺寸恰好不变，
+        # Textual 不会再发 Resize，这一块就永远空白。布局完成后再补一次。
+        self.call_after_refresh(self._render_after_layout)
 
     def on_unmount(self) -> None:
         try:
@@ -380,6 +384,12 @@ class MarkdownStatic(Static):
     def _on_theme_changed(self, theme) -> None:
         # Markdown 在 Rich 阶段已经固定了颜色，换主题后必须重排一次。
         self._render_width = -1
+        self._render_markdown()
+
+    def _render_after_layout(self) -> None:
+        """首帧布局后再排一次：mount 时宽度未知的块靠这里补渲染。"""
+        if not self.is_mounted:
+            return
         self._render_markdown()
 
     def on_resize(self, event) -> None:

@@ -8,7 +8,6 @@ import time
 from alex.config import reload_config
 from alex.core.snapshots import Checkpoint
 from alex.screens.confirm import ALLOW, ALWAYS, DENY
-from alex.ui.activity import SHELL_TOOLS
 from alex.ui.constants import PROMPT_PLACEHOLDER, USER
 from alex.ui.panels import QueueCard
 from alex.ui.widgets import PromptInput
@@ -48,6 +47,7 @@ class EventRouterMixin:
         "history_reset": "_on_history_reset",
         "checkpoints": "_on_checkpoints",
         "changes": "_on_changes",
+        "shell_card": "_on_shell_card",
         # Goal / Queue
         "goal_card": "_on_goal_card",
         "goal_verify_start": "_on_goal_verify_start",
@@ -60,6 +60,20 @@ class EventRouterMixin:
     }
 
     def _handle_event(self, kind: str, data: dict) -> None:
+        """统一入口：先落 daemon 指定的历史记录，再分发到界面处理。
+
+        记录必须和挂载同时发生，顺序也要一致（先写历史，再挂控件）；界面
+        这边不再自行 ``view.history.append``，避免“事件带一份 + 本地再写一份”。
+        ``record`` 可以是单条 ``[kind, payload]``，也可以是一组（reply_end 同时
+        写正文和 stats）。
+        """
+        record = data.get("record")
+        if record:
+            if isinstance(record[0], (list, tuple)):
+                for item in record:
+                    self.view.record(item[0], item[1])
+            else:
+                self.view.record(record[0], record[1])
         handler = self._EVENT_HANDLERS.get(kind)
         if handler is not None:
             getattr(self, handler)(data)
@@ -141,13 +155,16 @@ class EventRouterMixin:
     # ---------------------------------------------------------------- 一轮对话的流式过程
     def _on_exchange_start(self, data: dict) -> None:
         exchange_id = int(data.get("exchange_id", self.view.exchange_seq))
-        self.view.begin_exchange(exchange_id, str(data.get("text", "")))
+        # 正在翻旧历史时又发了新消息：先回到最新窗口，否则这条消息和随后的
+        # 流式回答都挂到旧窗口下面，用户根本看不见。
+        self._ensure_latest_window()
         self._turn_text_streamed = False
         self._turn_diff_cards = 0
         self._concise_card = None
         self._verifier_mode = False
         self._goal_phase = ""
         self._set_progress({"text": ""})
+        self.view.begin_exchange(exchange_id, data.get("text", ""))
         self._append_block(USER, data.get("text", ""), exchange_id)
         if self._concise:
             self._begin_concise_summary()
@@ -204,41 +221,28 @@ class EventRouterMixin:
     def _on_tool_result(self, data: dict) -> None:
         tool_id = str(data.get("id", ""))
         text = str(data.get("text", ""))
-        name = str(data.get("name", ""))
         self._live_tool_data.pop(tool_id, None)
         self._finish_tool_row(tool_id, data)
         self._live_runs.finish(tool_id)
         self._refresh_task_status()
         # Edit / Write 一完成就把这次的 diff 挂到该工具行下面（默认收起）
         self._append_tool_diff(data)
-        if name in SHELL_TOOLS:
-            if str(data.get("state") or "") != "denied":
-                self._record_shell_result(data)
-        elif text:
-            self.view.history.append((str(data.get("kind", "result")), text))
+        # 历史由 daemon 的 record 统一写入（含 shell 卡），这里只负责挂载
         self._set_activity(text)
 
-    def _record_shell_result(self, data: dict) -> None:
-        """把 shell 结果记进本地 history，换主题/重建时摘要仍有 Shell 行。"""
-        entry = {
-            "request_id": "",
-            "agent": "Alex",
-            "tool": str(data.get("name") or "Shell"),
-            "command": str(data.get("command") or ""),
-            "cwd": getattr(self, "_workspace", "") or "",
-            "allow_always": False,
-            "rules": [],
-            "state": "done" if data.get("ok", True) else "failed",
-            "result_text": str(data.get("text") or ""),
-            "stdout": str(data.get("stdout") or ""),
-            "line_count": int(data.get("line_count", 0) or 0),
-            "exit_code": int(
-                data.get("exit_code", 0 if data.get("ok") else 1) or 0
-            ),
-        }
-        self.view.history.append(
-            ("shell_card", json.dumps(entry, ensure_ascii=False))
-        )
+    def _on_shell_card(self, data: dict) -> None:
+        """shell 卡的状态同步：历史已由 record 落好，屏幕上那张卡就地改状态。"""
+        card = getattr(self, "_permission_card", None)
+        if card is None:
+            return
+        request_id = str(data.get("request_id") or "")
+        payload = dict(getattr(card, "_payload", {}) or {})
+        if not request_id or request_id != str(payload.get("request_id") or ""):
+            return
+        state = str(data.get("state") or "")
+        if state not in {"allowed", "denied", "done", "failed"}:
+            return
+        card.set_state(state)
 
     def _on_reply_end(self, data: dict) -> None:
         self._finish_reply(data)
@@ -288,6 +292,9 @@ class EventRouterMixin:
 
     def _on_history_reset(self, data: dict) -> None:
         self.view.reset_session(data.get("history", []))
+        # 历史被整体替换（撤销/清空/重连）：窗口回到最新，旧下标已失效。
+        self._window_start = None
+        self._window_end = None
         if "checkpoints" in data:
             self.view.set_checkpoints(data.get("checkpoints") or [])
             self._history_needs_checkpoints = False

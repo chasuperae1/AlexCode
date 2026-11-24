@@ -37,6 +37,14 @@ class CompactionStatus(Static):
         self.update(line)
 
 
+class WindowEdge(Static):
+    """窗口边界行：只在还有更早 / 更晚的历史没挂载时出现。"""
+
+    def __init__(self, label: str, direction: str) -> None:
+        super().__init__(label, classes=f"window-edge window-edge-{direction}")
+        self.direction = direction
+
+
 class ChatLog(VerticalScroll):
     """聊天区：增量挂载消息控件（Markdown 渲染），自动滚到底部。
 
@@ -47,12 +55,16 @@ class ChatLog(VerticalScroll):
     # 所以贴底不能只做一次：短时间跟随内容变化，高度稳定后再停。
     FOLLOW_INTERVAL = 0.1
     FOLLOW_MAX_SECONDS = 3.0
+    # 高度是按批稳定的：几帧之内 max_scroll_y 可能连续两次不变，随后又长一截。
+    # 太早判定“稳定”就会停在半页，所以至少跟随这么久再允许停。
+    FOLLOW_MIN_SECONDS = 1.2
     _suspend_scroll = False
     _follow_timer = None
     _follow_last_max = -1
     _follow_stable = 0
     _follow_last_y = 0
     _follow_deadline = 0.0
+    _follow_started = 0.0
 
     DEFAULT_CSS = """
     ChatLog {
@@ -120,6 +132,18 @@ class ChatLog(VerticalScroll):
         padding: 0;
         margin: 0 0 1 0;
         text-align: right;
+    }
+    ChatLog .window-edge {
+        height: 1;
+        color: $text-muted;
+        background: $background;
+        text-align: center;
+        padding: 0;
+        margin: 0 0 1 0;
+    }
+    ChatLog .window-edge:hover {
+        color: $primary;
+        text-style: underline;
     }
     ChatLog .ask-history {
         height: auto;
@@ -193,7 +217,23 @@ class ChatLog(VerticalScroll):
             child.remove()
 
     def on_click(self, event) -> None:
-        if isinstance(event.widget, UserMessage):
+        if isinstance(event.widget, WindowEdge):
+            event.stop()
+            handler = getattr(
+                self.app,
+                "load_earlier_history"
+                if event.widget.direction == "earlier"
+                else "load_newer_history",
+                None,
+            )
+            if handler is not None:
+                handler()
+            # 点击聊天区会把焦点交给 ChatLog，用户接着打字就落不到输入框；
+            # 翻页是浏览动作，交还焦点才符合预期。
+            focus = getattr(self.app, "_restore_prompt_focus", None)
+            if focus is not None:
+                self.call_after_refresh(focus)
+        elif isinstance(event.widget, UserMessage):
             event.stop()
             handler = getattr(self.app, "open_message_actions", None)
             if handler is not None:
@@ -219,7 +259,11 @@ class ChatLog(VerticalScroll):
 
     def _mount(self, widget) -> None:
         self.query_one("#chat-body").mount(widget)
-        if not self._suspend_scroll:
+        # 正在看历史窗口时不要把人拽到底部；新消息照常挂在窗口下方，
+        # 回到最新时整体重建再显示。
+        if not self._suspend_scroll and getattr(
+            self.app, "_window_start", None
+        ) is None:
             self.call_after_refresh(self._pin_to_bottom)
 
     def _pin_to_bottom(self) -> None:
@@ -236,35 +280,49 @@ class ChatLog(VerticalScroll):
 
         历史整体重建时 ``mount_all`` 一次挂上几十上百个 Markdown 控件，首帧
         只算出了部分高度；只贴一次会停在半途，重启后视口仍不在最新消息处。
-        这里每帧贴一次，连续两帧最大滚动值不再变化（或超时）就停止。
+        这里每帧贴一次，到过底部且连续两帧高度不变（并且已经跟随
+        ``FOLLOW_MIN_SECONDS``）才停。
         """
         self._follow_deadline = time.monotonic() + seconds
+        self._follow_started = time.monotonic()
         self._follow_last_max = -1
         self._follow_stable = 0
         self._pin_to_bottom()
-        self._follow_last_y = self.max_scroll_y
+        # 以“当前位置”作为防误判基准：scroll_end 可能还要等一帧布局才生效，
+        # 此时直接拿 max_scroll_y 当基准，会把应用自己的贴底当成用户上翻而停掉。
+        self._follow_last_y = self.scroll_y
         if self._follow_timer is None:
             self._follow_timer = self.set_interval(
                 self.FOLLOW_INTERVAL, self._follow_tick
             )
 
     def _follow_tick(self) -> None:
-        if self._follow_last_y and self.scroll_y + 3 < self._follow_last_y:
+        max_y = self.max_scroll_y
+        # 高度还在长（max 变大）时，旧的最大值不代表用户上翻，先别下结论。
+        grew = max_y > self._follow_last_max
+        if (
+            not grew
+            and self._follow_last_y
+            and self.scroll_y + 3 < self._follow_last_y
+        ):
             # 用户自己往上翻了：立即停止跟随，别把人拽回底部
             self._stop_follow()
             return
-        max_y = self.max_scroll_y
-        if max_y == self._follow_last_max:
-            self._follow_stable += 1
-        else:
-            self._follow_last_max = max_y
-            self._follow_stable = 0
         self.scroll_end(animate=False)
         self._follow_last_y = max_y
+        at_bottom = self.scroll_y >= self.max_scroll_y - 1
+        if max_y == self._follow_last_max and at_bottom:
+            self._follow_stable += 1
+        else:
+            self._follow_stable = 0
+        self._follow_last_max = max_y
+        now = time.monotonic()
         if (
             self._follow_stable >= 2
-            or time.monotonic() >= self._follow_deadline
+            and now - self._follow_started >= self.FOLLOW_MIN_SECONDS
         ):
+            self._stop_follow()
+        elif now >= self._follow_deadline:
             self._stop_follow()
 
     def _stop_follow(self) -> None:

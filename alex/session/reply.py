@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import time
 from dataclasses import asdict, dataclass
@@ -11,12 +12,13 @@ from typing import Any
 
 from alex.config import CONFIG, workspace_path
 from alex.core.images import build_user_message
-from alex.core.snapshots import Checkpoint, now_label
+from alex.core.snapshots import Checkpoint, checkpoint_index, now_label
 
 from alex.session.common import (
     ASSISTANT,
     READONLY_TOOLS,
     USER,
+    record_payload,
 )
 
 
@@ -140,6 +142,8 @@ class ReplyMixin:
         )
 
         self._begin_turn()
+        # 每轮开始时先当成普通回答；goal 流水线验收阶段会把它切到 verifier
+        self._verifier_reply = False
         run = _ReplyRun(
             history_start=history_start,
             exchange_id=exchange_id,
@@ -220,12 +224,8 @@ class ReplyMixin:
             return
         run.summary_before = summary_now
         run.compacted = True
-        self.emit(
-            "compaction",
-            {
-                "summary": str(summary_now or ""),
-                "detail": "older messages summarized",
-            },
+        self._record_compaction(
+            str(summary_now or ""), "older messages summarized"
         )
         asyncio.create_task(self._update_meta())
 
@@ -250,9 +250,12 @@ class ReplyMixin:
         self.stream_text = ""
         if run.interrupted:
             run.final_text = "Stopped."
+        # 验收者的正文单独记一种类型，重建时才不会把它算成 Alex 的回答
+        kind = (
+            "verifier_text" if getattr(self, "_verifier_reply", False) else ASSISTANT
+        )
         if run.final_text:
-            self.history.append((ASSISTANT, run.final_text))
-            self._save_history()
+            self.history.append((kind, run.final_text))
         self._activity = ""
         self._stopping = False
         # 队列执行期间保持忙碌，避免任务之间的空档解锁输入框
@@ -285,6 +288,27 @@ class ReplyMixin:
             compacted=run.compacted,
             mutated=run.mutated,
         )
+        # 本轮用量作为独立历史记录：重建时回答下方还能有同一行统计
+        stats_payload = {
+            "exchange_id": run.exchange_id,
+            "duration": duration,
+            "input_tokens": stats.input_tokens,
+            "output_tokens": stats.output_tokens,
+            "cache_tokens": stats.cache_input_tokens,
+            "compacted": stats.compacted,
+        }
+        has_stats = bool(stats.input_tokens or stats.output_tokens)
+        if has_stats:
+            self.history.append(
+                ("stats", json.dumps(stats_payload, ensure_ascii=False))
+            )
+        if run.final_text or has_stats:
+            self._save_history()
+        records: list[list[Any]] = []
+        if run.final_text:
+            records.append([kind, run.final_text])
+        if has_stats:
+            records.append(["stats", stats_payload])
         self.emit(
             "reply_end",
             {
@@ -295,6 +319,7 @@ class ReplyMixin:
                 "output_tokens": stats.output_tokens,
                 "cache_tokens": stats.cache_input_tokens,
                 "compacted": stats.compacted,
+                **({"record": records} if records else {}),
             },
         )
         self._emit_status()
@@ -448,6 +473,8 @@ class ReplyMixin:
         if not card_logged:
             self.history.append((kind, text))
         self._save_history()
+        # shell 卡的结果由 shell_card 事件承载，tool_result 只带普通结果行
+        record = {} if card_logged else record_payload(kind, text)
         self.emit(
             "tool_result",
             {
@@ -466,6 +493,7 @@ class ReplyMixin:
                 "stdout": stats.get("stdout", ""),
                 "line_count": stats.get("line_count", 0),
                 "exit_code": stats.get("exit_code"),
+                **record,
             },
         )
         self._set_activity(text)
@@ -562,6 +590,7 @@ class ReplyMixin:
                 "state": "error",
                 "elapsed": 0.0,
                 "text": text,
+                **record_payload("error", text),
             },
         )
         self._set_activity("Reached max iterations")
@@ -639,4 +668,15 @@ class ReplyMixin:
                 {"checkpoints": [asdict(item) for item in self._checkpoints]},
             )
             if checkpoint.files:
-                self.emit("changes", {"checkpoint": asdict(checkpoint)})
+                # 事件带完整 checkpoint 供实时挂卡；历史只留索引，
+                # diff 正文由 get_diff 按需取，不塞进 history。
+                payload = {"checkpoint": asdict(checkpoint)}
+                index = {"checkpoint": checkpoint_index(checkpoint)}
+                self.history.append(
+                    ("changes", json.dumps(index, ensure_ascii=False))
+                )
+                self._save_history()
+                self.emit(
+                    "changes",
+                    {**payload, **record_payload("changes", index)},
+                )

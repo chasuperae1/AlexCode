@@ -87,6 +87,17 @@ class Checkpoint:
         )
 
 
+def checkpoint_index(checkpoint: Checkpoint) -> dict:
+    """历史里只存变更索引：回合、路径、增删行数、时间；正文走 get_diff。"""
+    return {
+        "exchange_id": checkpoint.exchange_id,
+        "files": list(checkpoint.files),
+        "additions": checkpoint.additions,
+        "deletions": checkpoint.deletions,
+        "created_at": checkpoint.created_at,
+    }
+
+
 def _exclude_spec(pattern: str) -> str:
     return pattern if pattern.startswith(":(exclude)") else f":(exclude){pattern}"
 

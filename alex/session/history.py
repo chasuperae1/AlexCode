@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import asdict
 from typing import Any
 
@@ -18,6 +19,7 @@ from alex.session.common import (
     ASSISTANT,
     SessionError,
     _format_tokens,
+    record_payload,
 )
 
 
@@ -160,7 +162,7 @@ class HistoryMixin:
                 else:
                     detail = f"{before_msgs} → {after_msgs} messages"
                 summary = str(getattr(agent.state, "summary", "") or "")
-                self.emit("compaction", {"summary": summary, "detail": detail})
+                self._record_compaction(summary, detail)
                 return {"compacted": True}
             raise SessionError(
                 "not_ready", "Context is below the compaction threshold; nothing to do"
@@ -330,5 +332,8 @@ class HistoryMixin:
         self.emit(
             "checkpoints", {"checkpoints": [asdict(item) for item in self._checkpoints]}
         )
+
+
+
 
 

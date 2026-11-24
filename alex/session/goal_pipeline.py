@@ -13,6 +13,7 @@ from alex.session.common import (
     GOAL_RESTATEMENT_PROMPT,
     GoalRestatement,
     SessionError,
+    record_payload,
 )
 
 
@@ -221,7 +222,10 @@ class GoalPipelineMixin:
         self._progress(
             f"Goal Round {state['round']}/{state['max_iters']} · verifying"
         )
-        self.emit("goal_verify_start", {"round": state["round"]})
+        self.emit(
+            "goal_verify_start",
+            {"round": state["round"], **record_payload("verifier", "")},
+        )
 
     def _on_goal_verdict(self, result: dict) -> None:
         """验收者的最终判定（框架内部消费，这里同步到卡片与进度）。"""
@@ -289,6 +293,9 @@ class GoalPipelineMixin:
         try:
             async for event in source:
                 state = self._goal_state
+                # 验收阶段的文字属于 Verifier，不能记成 Alex 的正文
+                if state is not None and state.get("phase") == "verifying":
+                    self._verifier_reply = True
                 if (
                     isinstance(event, TextBlockDeltaEvent)
                     and state is not None
@@ -337,6 +344,7 @@ class GoalPipelineMixin:
                 status = "stopped"
             self._finish_goal(status)
             if executor_text:
+                self._verifier_reply = False
                 yield AssistantMsg(name="Alex", content="".join(executor_text))
 
     def _advance_after_error(self, state: dict[str, Any], exc: Exception) -> None:

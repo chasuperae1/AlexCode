@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 
 from rich.text import Text
@@ -334,11 +335,15 @@ class ChatStreamMixin:
                 segment = (
                     "… (earlier content hidden)\n" + segment[-_STREAM_TAIL:]
                 )
-            # 工具/思考之前的中间 assistant 文本也要进 history，否则主题
-            # 切换或设置变更触发重建时，这段只存在于当前界面的文字会消失。
+            # 工具/思考之前的中间正文也要进 history，否则主题切换或设置变更
+            # 触发重建时，这段只存在于当前界面的文字会消失。验收者说的正文
+            # 记成 verifier_text，重建时才不会挂到 Alex 名下。
             persisted = raw.strip()
             if persisted:
-                self.view.history.append((ASSISTANT, persisted))
+                self.view.record(
+                    "verifier_text" if self._verifier_mode else ASSISTANT,
+                    persisted,
+                )
             self._render_stream_segment(segment)
             self._stream_md = None
             # 已落进 history 的中间正文不能继续留在流式缓冲里，否则重建时
@@ -399,6 +404,32 @@ class ChatStreamMixin:
         prefix, color = styles.get(kind, ("· ", theme.secondary))
         return Text(f"{prefix}{content}", style=color)
 
+    def _verifier_label(self, theme=None):
+        """验收者角色行：实时挂载与历史重建共用同一份。"""
+        theme = theme or self.current_theme
+        return Static(
+            Text("Verifier", style=f"bold {theme.secondary}"),
+            classes="role-verifier",
+        )
+
+    def _compaction_widget(self, summary: str, detail: str = "", theme=None):
+        """压缩提示卡：实时挂载与历史重建共用同一份排版。"""
+        theme = theme or self.current_theme
+        label = "≡ Context compacted"
+        if detail:
+            label += f" · {detail}"
+        body = summary.strip()
+        children = [
+            Static(
+                Text(label, style=f"bold {theme.secondary}"),
+                classes="compaction-title",
+            )
+        ]
+        if body:
+            children.append(MarkdownStatic(body, classes="md compaction-body"))
+        # 标题与摘要作为一个整体一次性挂载，避免分块出现像在流式追加。
+        return Vertical(*children, classes="compaction-block")
+
     def _append_compaction(self, summary: str, detail: str = "") -> None:
         """在聊天区标记本轮发生过上下文压缩，并展示摘要。"""
         # 摘要是一次性结果：先收起加载行，再整块挂载，避免 spinner 与结果
@@ -408,19 +439,7 @@ class ChatStreamMixin:
             chat = self.query_one("#chat", ChatLog)
         except Exception:
             return
-        theme = self.current_theme
-        label = "↺ Context compacted"
-        if detail:
-            label += f" · {detail}"
-        body = summary.strip()
-        children = [Static(Text(label, style=f"bold {theme.secondary}"),
-                           classes="compaction-title")]
-        if body:
-            children.append(
-                MarkdownStatic(body, classes="md compaction-body")
-            )
-        # 标题与摘要作为一个整体一次性挂载，避免分块出现像在流式追加。
-        chat.add_widget(Vertical(*children, classes="compaction-block"))
+        chat.add_widget(self._compaction_widget(summary, detail))
 
     def _make_turn_stats(
         self,
@@ -467,3 +486,22 @@ class ChatStreamMixin:
         except Exception:
             return
         chat.add_widget(widget)
+
+    def _turn_stats_widgets(self, content: str) -> list:
+        """从 stats 记录还原本轮统计行；简洁模式由汇总卡承载，不再单独挂。"""
+        if self._concise:
+            return []
+        try:
+            data = json.loads(content)
+        except (TypeError, ValueError):
+            return []
+        if not isinstance(data, dict):
+            return []
+        widget = self._make_turn_stats(
+            float(data.get("duration") or 0.0),
+            int(data.get("input_tokens") or 0),
+            int(data.get("output_tokens") or 0),
+            int(data.get("cache_tokens") or 0),
+            bool(data.get("compacted")),
+        )
+        return [widget] if widget is not None else []

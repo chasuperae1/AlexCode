@@ -79,6 +79,8 @@ class AlexApp(StartupMixin, EventsMixin, ChatMixin, ChromeMixin, InputMixin, Ter
         ("ctrl+o", "toggle_debug", "Debug log"),
         ("ctrl+q", "quit", "Quit"),
         ("ctrl+v", "paste_image", "Paste image"),
+        ("ctrl+up", "history_earlier", "Earlier history"),
+        ("ctrl+down", "history_newer", "Newer history"),
         # cmd / Windows Terminal 会把 Ctrl+V 当成终端自己的粘贴，应用收不到，
         # 留终端不占用的键给截图粘贴用
         ("alt+v", "paste_image", "Paste image"),

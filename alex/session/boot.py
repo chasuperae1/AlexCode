@@ -276,3 +276,4 @@ class BootMixin:
                 1 if rules else 0, ("skill", "Skills: " + ", ".join(skills))
             )
         return len(rules), len(skills)
+

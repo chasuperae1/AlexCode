@@ -95,13 +95,7 @@ class ChromeMixin(ChromeThemeMixin, ChromePaletteMixin):
             return
         self._close_stream_block()
         self._verifier_mode = True
-        theme = self.current_theme
-        self._append_widget(
-            Static(
-                Text("Verifier", style=f"bold {theme.secondary}"),
-                classes="role-verifier",
-            )
-        )
+        self._append_widget(self._verifier_label())
 
     def _exit_verifier(self) -> None:
         """验收结束、进入下一轮执行：恢复 Alex 角色与正文块。"""

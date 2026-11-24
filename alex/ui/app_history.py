@@ -11,9 +11,18 @@ from textual.widgets import Collapsible, Static
 from alex.core.snapshots import Checkpoint
 from alex.ui.constants import ASSISTANT, DEBUG_KINDS, USER
 from alex.ui.activity import SHELL_TOOLS
+from alex.ui.chat_window import (
+    PAGE_UNITS,
+    TRIM_UNITS,
+    earlier_start,
+    forward_end,
+    tail_start,
+    window_units,
+)
 from alex.ui.panels import ChatLog, ConciseSummary
+from alex.ui.panels_chat import WindowEdge
 from alex.ui.cards import ShellPermissionCard
-from alex.ui.widgets import InlineDiffCard, ToolDiffCard
+from alex.ui.widgets import ChangesSummary, InlineDiffCard, ToolDiffCard
 
 
 def _parse_skill_record(text: str) -> tuple[str, float] | None:
@@ -65,16 +74,50 @@ class _HistoryBuild:
     turn_widget_start: int = 0
     skip_shell_request: str = ""
     shell_cards: dict[str, ShellPermissionCard] = field(default_factory=dict)
+    # 已有 changes 记录的回合：变更卡由记录还原，不再用 checkpoint 补第二张
+    changes_exchanges: set[int] = field(default_factory=set)
+    # 上一条历史类型：连续 verifier_text 只挂一次角色行
+    last_kind: str = ""
+
+
+def _changes_exchanges(history: list[tuple[str, str]]) -> set[int]:
+    """扫出已写入 changes 记录的回合 id。"""
+    exchanges: set[int] = set()
+    for kind, content in history:
+        if kind != "changes":
+            continue
+        try:
+            data = json.loads(content)
+            checkpoint = data.get("checkpoint") or {}
+            exchanges.add(int(checkpoint.get("exchange_id") or 0))
+        except (TypeError, ValueError, AttributeError):
+            continue
+    return exchanges
 
 
 class HistoryMixin:
     """历史回放与代码卡恢复。"""
+
+    # 当前挂载的窗口区间 [start, end)；None 表示“跟随最新”。
+    # 只影响控件，不删 history。
+    _window_start: int | None = None
+    _window_end: int | None = None
 
     def _render_history(self) -> None:
         """重建整个聊天区：用户消息 → 折叠的调试组 → 回答。"""
         chat = self.query_one("#chat", ChatLog)
         self._chat_ref = chat
         body = chat.query_one("#chat-body")
+        # 未作答的选择题、审批卡不在 history 里，必须挂在可见处。
+        # 正在翻旧窗口时直接切回最新，避免 _show_ask/_attach_permission_card
+        # 再触发一次递归重建、让外层用旧锚点恢复滚动。
+        if self._window_start is not None and (
+            getattr(self, "_ask_payload", None)
+            or getattr(self, "_permission_pending", False)
+        ):
+            self._window_start = None
+            self._window_end = None
+        start, end = self._history_bounds()
         # 正在展示的权限卡直接留在原处，避免 clear → 重挂之间出现空窗或叠卡；
         # 已落进 history 的 shell 卡则由下面的 _history_shell_card_entry 重建。
         active = getattr(self, "_permission_card", None)
@@ -87,7 +130,11 @@ class HistoryMixin:
         # 紧跟 checkpoints）会把视口定格在半途。
         at_bottom = chat.is_vertical_scroll_end or chat._follow_timer is not None
         anchor = int(chat.scroll_y)
-        live_summary = self._concise_card_widget() if self._concise else None
+        # 正在翻旧窗口时，当前回合的实时卡/流式块不属于这个区间。
+        at_tail = end >= len(self.view.history)
+        live_summary = (
+            self._concise_card_widget() if self._concise and at_tail else None
+        )
         live_summary_state = (
             live_summary.snapshot_state()
             if isinstance(live_summary, ConciseSummary)
@@ -107,8 +154,10 @@ class HistoryMixin:
             concise=self._concise,
             remaining=remaining,
             skip_shell_request=skip_request,
+            changes_exchanges=_changes_exchanges(self.view.history),
         )
-        self._build_history(build, checkpoint_by_user)
+        self._build_history(build, checkpoint_by_user, start=start, end=end)
+        self._insert_window_edges(build, start, end, len(self.view.history))
         if live_summary_state is not None:
             # 当前用户回合里，一个内部 reply 可能产生多个 checkpoint，历史回放
             # 会各生成一张 step 卡；而界面上本来只有一张实时卡。重建时把本回合
@@ -133,6 +182,7 @@ class HistoryMixin:
             build,
             before=keep,
             thinking_started=thinking_started,
+            live=at_tail,
         )
         if build.concise and keep is not None:
             summary = self._concise_card_widget()
@@ -151,6 +201,127 @@ class HistoryMixin:
         if getattr(self, "_permission_pending", False) and active is None:
             self._attach_permission_card()
         self._restore_chat_scroll(chat, at_bottom=at_bottom, anchor=anchor)
+
+    def action_history_earlier(self) -> None:
+        self.load_earlier_history()
+
+    def action_history_newer(self) -> None:
+        self.load_newer_history()
+
+    def _history_bounds(self) -> tuple[int, int]:
+        """当前应该挂载的 [start, end)；None 表示跟随最新。"""
+        history = self.view.history
+        total = len(history)
+        if total == 0:
+            self._window_start = None
+            self._window_end = None
+            return 0, 0
+        if self._window_start is None:
+            return tail_start(history), total
+        start = int(self._window_start)
+        end = (
+            int(self._window_end)
+            if self._window_end is not None
+            else forward_end(history, start)
+        )
+        # 会话被撤销/清空或窗口已经追上尾部：回到跟随最新。
+        if start >= total or end >= total:
+            self._window_start = None
+            self._window_end = None
+            return tail_start(history), total
+        if end <= start:
+            end = forward_end(history, start)
+        if end <= start:
+            self._window_start = None
+            self._window_end = None
+            return tail_start(history), total
+        self._window_end = end
+        return start, min(end, total)
+
+    def _insert_window_edges(
+        self,
+        build: _HistoryBuild,
+        start: int,
+        end: int,
+        total: int,
+    ) -> None:
+        """窗口两端各放一行“加载更早/更晚”，比只靠滚动触发可靠。"""
+        if start > 0:
+            build.widgets.insert(
+                0,
+                WindowEdge(f"↑ Load earlier · {start} in history", "earlier"),
+            )
+            # 顶部插了一行，摘要卡的位置判断也要跟着偏移。
+            build.turn_widget_start += 1
+        if end < total:
+            build.widgets.append(
+                WindowEdge(f"↓ Load newer · {total - end} later", "newer")
+            )
+
+    def load_earlier_history(self) -> None:
+        """把窗口整体换成当前窗口之前的一页（相邻，不重叠）。"""
+        history = self.view.history
+        if not history:
+            return
+        current = (
+            self._window_start
+            if self._window_start is not None
+            else tail_start(history)
+        )
+        if current <= 0:
+            return
+        new_start = earlier_start(history, current, PAGE_UNITS)
+        if new_start >= current:
+            return
+        self._window_start = new_start
+        self._window_end = current
+        self._render_history()
+        chat = self.query_one("#chat", ChatLog)
+        # 一页有一百多个 Markdown 块，高度要好几帧才稳定；跟随时间给足，
+        # 否则会停在页中间，底部的 “Load newer” 行直接落在视野外。
+        chat.follow_bottom()
+
+    def load_newer_history(self) -> None:
+        """往后翻一页；追上尾部时回到跟随最新。"""
+        if self._window_start is None:
+            return
+        history = self.view.history
+        start = (
+            self._window_end
+            if self._window_end is not None
+            else forward_end(history, self._window_start)
+        )
+        if start >= len(history) or start >= tail_start(history):
+            self._window_start = None
+            self._window_end = None
+            self._render_history()
+            self.query_one("#chat", ChatLog).follow_bottom()
+            return
+        self._window_start = start
+        self._window_end = forward_end(history, start, PAGE_UNITS)
+        self._render_history()
+        chat = self.query_one("#chat", ChatLog)
+        # _render_history 可能把旧 scroll_y 的恢复排到下一帧；这里再排一次，
+        # 保证“往后翻”最终停在新区间顶部。
+        self.call_after_refresh(lambda: chat.scroll_home(animate=False))
+
+    def _ensure_latest_window(self) -> None:
+        """权限卡/选择题必须看得见：正在翻历史时先回到最新。"""
+        if self._window_start is None:
+            return
+        self._window_start = None
+        self._window_end = None
+        self._render_history()
+
+    def _maybe_trim_window(self) -> None:
+        """一轮结束后，活跃控件超过预算就重建回最近一屏。"""
+        if self._window_start is not None:
+            return
+        if not self.view.history:
+            return
+        if window_units(self.view.history) <= TRIM_UNITS:
+            return
+        self._render_history()
 
     def _restore_chat_scroll(
         self, chat: ChatLog, at_bottom: bool, anchor: int
@@ -194,26 +365,39 @@ class HistoryMixin:
         self,
         build: _HistoryBuild,
         checkpoint_by_user: dict[int, Checkpoint],
+        start: int = 0,
+        end: int | None = None,
     ) -> None:
-        if not build.concise:
+        items = self.view.history
+        end = len(items) if end is None else min(end, len(items))
+        start = max(0, min(start, end))
+        if not build.concise and start == 0:
             rules_widget = self._rules_summary_widget()
             if rules_widget is not None:
                 build.widgets.append(rules_widget)
-        index = 0
-        while index < len(self.view.history):
-            kind, content = self.view.history[index]
+        index = start
+        while index < end:
+            kind, content = items[index]
             if kind in ("rule", "skill"):
                 # 来源已由顶部 Rules 行 / 摘要卡统一呈现，旧历史里的公告行不再重复
+                build.last_kind = kind
                 index += 1
                 continue
             if kind == "shell_card":
                 self._history_shell_card_entry(build, content)
+            elif kind == "compaction":
+                self._history_compaction_entry(build, content)
+            elif kind == "changes":
+                self._history_changes_entry(build, content)
+            elif kind == "verifier_text":
+                self._history_verifier_text_entry(build, content)
             elif kind in DEBUG_KINDS:
                 self._history_debug_entry(build, kind, content)
             elif kind == USER:
                 self._history_user_entry(build, index, content, checkpoint_by_user)
             else:
                 self._history_reply_entry(build, kind, content)
+            build.last_kind = kind
             index += 1
         if build.concise:
             checkpoint = (
@@ -269,6 +453,73 @@ class HistoryMixin:
         build.widgets.append(card)
         if request_id:
             build.shell_cards[request_id] = card
+
+    def _history_compaction_entry(
+        self, build: _HistoryBuild, content: str
+    ) -> None:
+        """压缩提示卡：和实时挂载的排版保持同一份。"""
+        try:
+            data = json.loads(content)
+        except (TypeError, ValueError):
+            return
+        if not isinstance(data, dict):
+            return
+        build.widgets.append(
+            self._compaction_widget(
+                str(data.get("summary") or ""),
+                str(data.get("detail") or ""),
+                build.theme,
+            )
+        )
+
+    @staticmethod
+    def _changes_checkpoint(raw: dict) -> Checkpoint:
+        """changes 记录只存索引；老会话里是完整 checkpoint，这里两种都兼容。"""
+        return Checkpoint(
+            before=str(raw.get("before") or ""),
+            after=str(raw.get("after") or ""),
+            context_start=int(raw.get("context_start") or 0),
+            history_start=int(raw.get("history_start") or 0),
+            prompt=str(raw.get("prompt") or ""),
+            created_at=str(raw.get("created_at") or ""),
+            files=[str(item) for item in raw.get("files") or []],
+            exchange_id=int(raw.get("exchange_id") or 0),
+            additions=int(raw.get("additions") or 0),
+            deletions=int(raw.get("deletions") or 0),
+        )
+
+    def _history_changes_entry(
+        self, build: _HistoryBuild, content: str
+    ) -> None:
+        """整轮变更卡：本回合展示过逐条 diff 时还原成摘要行，否则还原整轮 diff。"""
+        if build.concise:
+            # 简洁模式的 Changes 行由 checkpoint 汇总卡承载
+            return
+        try:
+            data = json.loads(content)
+        except (TypeError, ValueError):
+            return
+        raw = data.get("checkpoint") if isinstance(data, dict) else None
+        if not isinstance(raw, dict):
+            return
+        try:
+            checkpoint = self._changes_checkpoint(raw)
+        except (TypeError, ValueError):
+            return
+        if checkpoint.exchange_id in build.tool_card_done:
+            build.widgets.append(ChangesSummary(checkpoint))
+            return
+        card = InlineDiffCard(checkpoint, build.theme)
+        build.widgets.append(card)
+        build.inline_diffs.append((checkpoint.exchange_id, card))
+
+    def _history_verifier_text_entry(
+        self, build: _HistoryBuild, content: str
+    ) -> None:
+        """验收者正文：归在 Verifier 角色下；缺少角色行时补一个。"""
+        if build.last_kind != "verifier":
+            build.widgets.append(self._verifier_label(build.theme))
+        build.widgets.extend(self._make_block_widgets("verifier_text", content))
 
     def _history_debug_entry(
         self, build: _HistoryBuild, kind: str, content: str
@@ -384,6 +635,7 @@ class HistoryMixin:
             and checkpoint is not None
             and len(checkpoint.files) == 1
             and checkpoint.exchange_id not in build.tool_card_done
+            and checkpoint.exchange_id not in build.changes_exchanges
         ):
             card = self._history_tool_card(checkpoint)
             if card is not None:
@@ -392,7 +644,12 @@ class HistoryMixin:
                 build.tool_card_done.add(checkpoint.exchange_id)
         build.widgets.extend(self._make_block_widgets(kind, content))
         if kind == ASSISTANT and checkpoint is not None:
-            if checkpoint.files and not build.concise and len(checkpoint.files) > 1:
+            if (
+                checkpoint.files
+                and not build.concise
+                and len(checkpoint.files) > 1
+                and checkpoint.exchange_id not in build.changes_exchanges
+            ):
                 diff_card = InlineDiffCard(checkpoint, build.theme)
                 build.widgets.append(diff_card)
                 build.inline_diffs.append((checkpoint.exchange_id, diff_card))
@@ -513,6 +770,7 @@ class HistoryMixin:
         before=None,
         *,
         thinking_started: float = 0.0,
+        live: bool = True,
     ) -> None:
         # 一次性挂载所有控件，避免逐个 mount 触发 N 次布局重排
         if build.widgets:
@@ -531,6 +789,9 @@ class HistoryMixin:
         self._thinking_static = None
         self._thinking_started = 0.0
         self._tool_rows = {}
+        if not live:
+            # 旧窗口里没有当前回合：思考、运行中的工具行、流式正文都不挂。
+            return
         # 思考先于工具行开始：重建时也要先挂思考、再挂运行中的工具行，
         # 否则主题切换会把两行的先后顺序倒过来。
         if self.view.thinking:

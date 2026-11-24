@@ -91,12 +91,12 @@ class ChatMixin(ChatStreamMixin, ChatDiffMixin):
             if card is not None:
                 widgets.append(card)
         elif kind == "verifier":
-            widgets.append(
-                Static(
-                    Text("Verifier", style=f"bold {theme.secondary}"),
-                    classes="role-verifier",
-                )
-            )
+            widgets.append(self._verifier_label(theme))
+        elif kind == "verifier_text":
+            # 角色行由前一条 "verifier" 记录提供；这里只还原正文
+            widgets.extend(self._assistant_content_widgets(content))
+        elif kind == "stats":
+            widgets.extend(self._turn_stats_widgets(content))
         elif kind == "ask":
             skipped = content.startswith(("Skipped", "Cancelled", "已跳过", "已取消"))
             line = Text()

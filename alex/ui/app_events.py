@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from pathlib import Path
 
 from rich.text import Text
@@ -12,7 +11,7 @@ from alex.config import reload_config
 from alex.daemon.client import LinkError
 from alex.screens.ask_choice import AskChoice
 from alex.screens.confirm import DENY
-from alex.ui.constants import ASSISTANT, PROMPT_PLACEHOLDER
+from alex.ui.constants import PROMPT_PLACEHOLDER
 from alex.ui.activity import SHELL_TOOLS
 from alex.ui.panels import ChatLog, CompactionStatus
 from alex.ui.widgets import PermissionDiffCard, PromptInput, ShellPermissionCard
@@ -33,6 +32,9 @@ class EventsMixin(EventRouterMixin, HistoryMixin):
 
 
     def _apply_snapshot(self, data: dict) -> None:
+        # 快照整体替换 history：窗口下标失效，回到最新。
+        self._window_start = None
+        self._window_end = None
         for item in data.get("boot", []) or []:
             stage = str(item.get("stage", ""))
             entry = self._boot.get(stage)
@@ -126,18 +128,6 @@ class EventsMixin(EventRouterMixin, HistoryMixin):
         prompt.placeholder = PROMPT_PLACEHOLDER
         prompt.focus()
 
-    def _remember_shell_card(self, card, state: str) -> None:
-        """把已结束的 shell 卡记进历史，重建聊天区时按完成态重新挂出来。"""
-        if getattr(card, "finishes_as_diff", True):
-            return
-        entry = dict(getattr(card, "_payload", {}) or {})
-        if not entry:
-            return
-        entry["state"] = state
-        self.view.history.append(
-            ("shell_card", json.dumps(entry, ensure_ascii=False))
-        )
-
     def _attach_permission_card(self) -> None:
         """按当前主题重建卡片（主题切换后文字颜色也要跟着变）。"""
         payload = getattr(self, "_permission_payload", None)
@@ -171,6 +161,7 @@ class EventsMixin(EventRouterMixin, HistoryMixin):
         ):
             # 历史重建会重挂卡片；同一次请求不重复建卡
             return
+        self._ensure_latest_window()
         self._permission_payload = dict(payload)
         choice = None
         future = asyncio.get_running_loop().create_future()
@@ -228,13 +219,12 @@ class EventsMixin(EventRouterMixin, HistoryMixin):
                     elif choice is not None:
                         summary.allow_shell(tool)
                 if choice == DENY:
-                    self._remember_shell_card(card, "denied")
+                    card.set_state("denied")
                 card.remove()
                 self._permission_card = None
                 self._permission_payload = None
             elif choice == DENY:
                 card.set_state("denied")
-                self._remember_shell_card(card, "denied")
                 self._permission_card = None
                 self._permission_payload = None
         if self._confirm_resolved or self.link is None:
@@ -261,6 +251,7 @@ class EventsMixin(EventRouterMixin, HistoryMixin):
             return
         if self._ask_request_id == request_id and self._ask_widget is not None:
             return
+        self._ensure_latest_window()
         if self._ask_widget is not None:
             self._ask_widget.mark_answer("Cancelled", skipped=True)
         self._ask_payload = dict(payload)
@@ -336,7 +327,6 @@ class EventsMixin(EventRouterMixin, HistoryMixin):
             widget.mark_answer(summary, skipped)
         else:
             self._append_block("ask", summary)
-        self.view.history.append(("ask", summary))
         self._ask_widget = None
         self._ask_request_id = ""
         self._ask_payload = None
@@ -345,14 +335,11 @@ class EventsMixin(EventRouterMixin, HistoryMixin):
 
     def _seal_stream(self) -> None:
         """作答后封口正文块与思考组，后续内容另起新块排在答案之后。"""
-        segment = self.view.stream_text[self._stream_offset:]
-        if self._stream_md is not None and segment:
-            self._stream_md.update(segment)
-        self._stream_md = None
-        self._stream_offset = len(self.view.stream_text)
-        if self._thinking_box is not None:
-            self._finish_thinking(self.view.thinking.strip())
-        self.view.thinking = ""
+        # 正文统一走 _close_stream_block：这段文字会同时落进 history，
+        # 否则重建后只剩答案、答案之前的正文凭空消失。
+        self._close_stream_block()
+        thinking = self.view.end_thinking()
+        self._finish_thinking(thinking)
         self._thinking_box = None
         self._thinking_static = None
         self._thinking_started = 0.0
@@ -395,7 +382,6 @@ class EventsMixin(EventRouterMixin, HistoryMixin):
         self._turn_text_streamed = False
         text = str(data.get("text", "") or "")
         if text:
-            self.view.history.append((ASSISTANT, text))
             display = segment if segment else (text if not streamed else "")
             if display:
                 if self._stream_md is None:
@@ -417,6 +403,16 @@ class EventsMixin(EventRouterMixin, HistoryMixin):
         duration = float(data.get("duration", 0.0))
         if self._concise:
             self._finish_concise_summary(duration)
+        else:
+            # 回答下方补一行耗时/用量；历史里同一条记录会在重建时还原它
+            self._append_turn_stats(
+                duration,
+                int(data.get("input_tokens", 0) or 0),
+                int(data.get("output_tokens", 0) or 0),
+                int(data.get("cache_tokens", 0) or 0),
+                bool(data.get("compacted")),
+            )
+        self._maybe_trim_window()
 
     async def on_unmount(self) -> None:
         if self.link is not None:
@@ -430,7 +426,14 @@ class EventsMixin(EventRouterMixin, HistoryMixin):
 
 
     def _jump_to_latest(self) -> None:
-        self.query_one("#chat", ChatLog).scroll_end(animate=False)
+        chat = self.query_one("#chat", ChatLog)
+        if getattr(self, "_window_start", None) is not None:
+            self._window_start = None
+            self._window_end = None
+            self._render_history()
+            chat.follow_bottom()
+            return
+        chat.scroll_end(animate=False)
 
     def on_click(self, event) -> None:
         widget_id = getattr(event.widget, "id", None)
