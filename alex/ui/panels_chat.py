@@ -6,10 +6,12 @@ import time
 
 from rich.text import Text
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
 from textual.widgets import Markdown, Static
 from termui.widgets import SPINNER_FRAMES
 
+from alex.ui.markdown import MarkdownStatic
 from alex.ui.widgets import ChangesSummary, UserMessage
 
 
@@ -43,6 +45,88 @@ class WindowEdge(Static):
     def __init__(self, label: str, direction: str) -> None:
         super().__init__(label, classes=f"window-edge window-edge-{direction}")
         self.direction = direction
+
+
+class CompactionBlock(Vertical):
+    """上下文压缩卡：默认收成一行标题，点击 / Enter / Space 展开摘要全文。
+
+    摘要动辄十几行，实时挂载时它会把正在追的对话顶走；历史里也占掉半屏，
+    所以默认收起，只留“≡ Context compacted · 12k → 4k”这一行。
+    """
+
+    can_focus = True
+
+    BINDINGS = [
+        Binding("enter", "toggle_body", "Expand/collapse", show=False),
+        Binding("space", "toggle_body", "Expand/collapse", show=False),
+    ]
+
+    def __init__(
+        self,
+        label: str,
+        body: str,
+        theme,
+        *,
+        width: int = 0,
+    ) -> None:
+        super().__init__(classes="compaction-block")
+        self._theme = theme
+        self._label = label
+        self._collapsed = True
+        self._title = Static(classes="compaction-title")
+        self._body = (
+            MarkdownStatic(body, classes="md compaction-body", app=None, width=width)
+            if body.strip()
+            else None
+        )
+        self._sync()
+
+    def compose(self) -> ComposeResult:
+        yield self._title
+        if self._body is not None:
+            yield self._body
+
+    def on_mount(self) -> None:
+        self._sync()
+
+    @property
+    def collapsed(self) -> bool:
+        return self._collapsed
+
+    def action_toggle_body(self) -> None:
+        if self._body is None:
+            return
+        at_bottom = False
+        try:
+            chat = self.app.query_one("#chat", ChatLog)
+            at_bottom = chat.scroll_y >= chat.max_scroll_y - 2
+        except Exception:
+            chat = None
+        self._collapsed = not self._collapsed
+        self._sync()
+        # 展开时正文长在标题下方：本来贴着底部的读者，要跟着往下挪一格，
+        # 否则新长出来的摘要在屏幕外。
+        if not self._collapsed and at_bottom and chat is not None:
+            def reveal() -> None:
+                chat.scroll_end(animate=False)
+
+            self.call_after_refresh(reveal)
+
+    def on_click(self, event) -> None:
+        if self._body is None:
+            return
+        event.stop()
+        self.focus()
+        self.action_toggle_body()
+
+    def _sync(self) -> None:
+        has_body = self._body is not None
+        marker = ("▸ " if self._collapsed else "▾ ") if has_body else ""
+        text = Text()
+        text.append(f"{marker}{self._label}", style=f"bold {self._theme.secondary}")
+        self._title.update(text)
+        if has_body:
+            self._body.display = not self._collapsed
 
 
 class ChatLog(VerticalScroll):

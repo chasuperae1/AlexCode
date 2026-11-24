@@ -12,7 +12,7 @@ from textual.widgets import Collapsible, Static
 from alex.ui.markdown import MarkdownStatic
 from alex.ui.activity import SHELL_TOOLS
 from alex.ui.constants import ASSISTANT
-from alex.ui.panels import ChatLog, ConciseSummary
+from alex.ui.panels import ChatLog, CompactionBlock, ConciseSummary
 from alex.ui.sources import format_bytes
 from alex.ui.widgets import _format_tokens
 
@@ -413,22 +413,23 @@ class ChatStreamMixin:
         )
 
     def _compaction_widget(self, summary: str, detail: str = "", theme=None):
-        """压缩提示卡：实时挂载与历史重建共用同一份排版。"""
+        """压缩提示卡：默认收起成一行，点击展开摘要。"""
+
         theme = theme or self.current_theme
         label = "≡ Context compacted"
         if detail:
             label += f" · {detail}"
-        body = summary.strip()
-        children = [
-            Static(
-                Text(label, style=f"bold {theme.secondary}"),
-                classes="compaction-title",
-            )
-        ]
-        if body:
-            children.append(MarkdownStatic(body, classes="md compaction-body"))
+        # 实时挂载没有历史重建的宽度缓存，就取聊天区当前宽度，
+        # 让摘要和重建路径一样先从预排版出来，展开时才不用等一帧。
+        width = int(getattr(self, "_md_build_width", 0) or 0)
+        if not width:
+            try:
+                body = self.query_one("#chat-body")
+                width = int(body.content_region.width or body.size.width or 0)
+            except Exception:
+                width = 0
         # 标题与摘要作为一个整体一次性挂载，避免分块出现像在流式追加。
-        return Vertical(*children, classes="compaction-block")
+        return CompactionBlock(label, summary, theme, width=width)
 
     def _append_compaction(self, summary: str, detail: str = "") -> None:
         """在聊天区标记本轮发生过上下文压缩，并展示摘要。"""
