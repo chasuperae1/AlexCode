@@ -51,6 +51,7 @@ class EventRouterMixin:
         # Goal / Queue
         "goal_card": "_on_goal_card",
         "goal_verify_start": "_on_goal_verify_start",
+        "goal_verdict": "_on_goal_verdict",
         "goal_round": "_on_goal_round",
         "goal_end": "_on_goal_end",
         "queue": "_on_queue",
@@ -335,6 +336,15 @@ class EventRouterMixin:
 
     def _on_goal_verify_start(self, data: dict) -> None:
         self._enter_verifier()
+
+    def _on_goal_verdict(self, data: dict) -> None:
+        """验收判定：验收者没写正文时，把它的一行结论挂在 Verifier 角色行下面。
+
+        没有这一行，屏幕上只剩一个空的 “Verifier” 标题，看起来像什么都没做。
+        """
+        text = str(data.get("text") or "")
+        if text:
+            self._append_block("verifier_text", text)
 
     def _on_goal_round(self, data: dict) -> None:
         self._exit_verifier()

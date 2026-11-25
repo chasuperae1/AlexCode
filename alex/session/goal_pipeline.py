@@ -206,6 +206,9 @@ class GoalPipelineMixin:
             row["status"] = "ok"
             row["text"] = self._one_line(report, 70) or "report ready"
             row["seconds"] = time.monotonic() - state["execute_started"]
+        state["last_report"] = report
+        # 进入验收：验收者如果一句话都不写，结束时要把判定补成一行挂在角色行下
+        state["verifier_spoke"] = False
         state["phase"] = "verifying"
         state["verify_started"] = time.monotonic()
         state["rows"].append(
@@ -244,12 +247,20 @@ class GoalPipelineMixin:
             )
             row["seconds"] = time.monotonic() - state["verify_started"]
         state["last_result"] = verdict
+        state["last_verdict_message"] = message
+        extra: dict[str, Any] = {}
+        if message and not state.get("verifier_spoke"):
+            # 验收者只出了结构化判定、没有正文：补一行结论，别让角色行空着。
+            line = f"{verdict} — {self._one_line(message, 120)}"
+            self.history.append(("verifier_text", line))
+            extra = {"text": line, "record": ["verifier_text", line]}
         self.emit(
             "goal_verdict",
             {
                 "round": state["round"],
                 "result": verdict,
                 "message": message,
+                **extra,
             },
         )
         if verdict == "fail" and state["round"] < state["max_iters"]:
@@ -296,6 +307,8 @@ class GoalPipelineMixin:
                 # 验收阶段的文字属于 Verifier，不能记成 Alex 的正文
                 if state is not None and state.get("phase") == "verifying":
                     self._verifier_reply = True
+                    if isinstance(event, TextBlockDeltaEvent):
+                        state["verifier_spoke"] = True
                 if (
                     isinstance(event, TextBlockDeltaEvent)
                     and state is not None
@@ -328,9 +341,21 @@ class GoalPipelineMixin:
             ):
                 self._advance_after_error(state, exc)
                 self._schedule_goal_retry()
-            else:
+                raise
+            # 最后一轮也炸了：这一轮不会再有第二次机会，把错误写进最终消息。
+            # 以前这里直接 raise，_reply 只留下一句 "(Request failed: …)"，
+            # 读者既看不到执行者的报告，也不知道目标到底做到哪一步。
+            snapshot = dict(state or {})
+            leftover = "".join(executor_text).strip()
+            if state is not None:
                 self._finish_goal("failed")
-            raise
+            self._verifier_reply = False
+            yield AssistantMsg(
+                name="Alex",
+                content=self._goal_final_text(
+                    "failed", snapshot, leftover, error=str(exc)
+                ),
+            )
         else:
             state = self._goal_state or {}
             result = state.get("last_result")
@@ -342,10 +367,46 @@ class GoalPipelineMixin:
                 status = "failed"
             else:
                 status = "stopped"
+            snapshot = dict(state)
             self._finish_goal(status)
-            if executor_text:
-                self._verifier_reply = False
-                yield AssistantMsg(name="Alex", content="".join(executor_text))
+            self._verifier_reply = False
+            # 无论成败都要交一条最终消息：执行者常常只调结构化报告工具、
+            # 一句正文都不写，此时若不补，读者眼前就只剩一张卡片和空白的
+            # Verifier 行，目标到底成没成全靠自己从卡片上猜。
+            yield AssistantMsg(
+                name="Alex",
+                content=self._goal_final_text(
+                    status, snapshot, "".join(executor_text).strip()
+                ),
+            )
+
+    @staticmethod
+    def _goal_final_text(
+        status: str,
+        state: dict[str, Any],
+        report: str = "",
+        *,
+        error: str = "",
+    ) -> str:
+        """把执行者的报告和这次目标的最终状态拼成一条消息。"""
+        round_no = max(1, int(state.get("round") or 1))
+        rounds = max(round_no, int(state.get("max_iters") or round_no))
+        if status == "passed":
+            head = f"Goal passed · round {round_no}/{rounds}"
+        elif status == "impossible":
+            head = f"Goal stopped · verifier judged it impossible · round {round_no}/{rounds}"
+        elif status == "failed":
+            head = f"Goal failed · round {round_no}/{rounds}"
+        else:
+            head = f"Goal stopped · round {round_no}/{rounds}"
+        if error:
+            head += f" · {error.strip().splitlines()[0][:120]}"
+        verdict = str(state.get("last_verdict_message") or "").strip()
+        lines = [report] if report else []
+        lines.append(head)
+        if verdict and status != "passed":
+            lines.append(f"Verifier: {verdict.splitlines()[0][:200]}")
+        return "\n\n".join(lines)
 
     def _advance_after_error(self, state: dict[str, Any], exc: Exception) -> None:
         """一次请求/验收出错：记本轮的失败原因，推进到下一轮。"""
