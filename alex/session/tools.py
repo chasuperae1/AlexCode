@@ -401,7 +401,9 @@ class ToolsMixin:
 
         text = AskUser._format_answer(answer, bool(payload.get("multi")))
         self._exchange_seq += 1
-        asyncio.create_task(
+        # 这一轮也要挂进 _reply_task：否则 Esc 看不见它，goal 重试也会把它
+        # 当成“已经结束”而在同一份状态上再起一轮。
+        self._reply_task = asyncio.create_task(
             self._reply(
                 f'Answer to the question "{payload.get("question", "")}": {text}',
                 len(self.history),
@@ -443,11 +445,21 @@ class ToolsMixin:
         if self._pending_future is not None and not self._pending_future.done():
             self._stopping = True
             self._pending_future.cancel()
+        if self._finishing:
+            # 收尾窗口：这一轮只剩写历史、落盘和记检查点，取消会正好把它们
+            # 截成两半（丢掉 stats / reply_end，界面停在半截）。这里只点亮
+            # 停止意图，收尾自己会走到 _release_turn；_stop_pending 还要拦住
+            # goal 的自动重试，否则它会紧接着又起一轮。
+            self._stop_pending = True
+            self._stopping = True
+            self._emit_status()
+            return
         task = self._reply_task
         if task is None or task.done():
             self._stopping = False
             self._emit_status()
             return
+        self._stop_pending = True
         self._stopping = True
         task.cancel()
         # 先终止正在运行的 shell 子进程，再等待 AgentScope 的事件流退出；
@@ -463,6 +475,9 @@ class ToolsMixin:
             pass
         except Exception:  # 任务异常退出，属中断收尾
             pass
+        if self._reply_task is task:
+            # 任务还没跑起来就被取消：没有 _finish_reply，槽位得在这里放行
+            self._release_turn()
         self._stopping = False
         self._emit_status()
 

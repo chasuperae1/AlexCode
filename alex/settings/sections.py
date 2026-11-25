@@ -14,79 +14,89 @@ from alex.settings.widgets import ModeSwitch, StatusDot
 class SectionsMixin:
     """分类内容：技能/规则/工具开关、徽标刷新、详情与文档弹层。"""
 
-    _BADGE_SECTIONS: dict[str, str] = {
-        "skills": "_badge_skills",
-        "rules": "_badge_rules",
-        "memory": "_badge_memory",
-        "mcp": "_badge_mcp",
-        "tokens": "_badge_tokens",
-        "preference": "_badge_preference",
-    }
-
     def _update_badges(self, section_id: str) -> None:
-        """按当前分区刷新顶部徽标；没有徽标的分区直接隐藏。"""
         primary = self.query_one("#settings-badge-primary", Static)
         secondary = self.query_one("#settings-badge-secondary", Static)
         badges = self.query_one("#settings-badges")
-        builder = getattr(self, self._BADGE_SECTIONS.get(section_id, ""), None)
-        if builder is None:
+        if section_id == "skills":
+            enabled = sum(1 for _name, _desc, on in self._skills if on)
+            primary.update(
+                Text.assemble(
+                    ("● ", "green"),
+                    (f"{len(self._skills)} skills loaded", "dim"),
+                )
+            )
+            secondary.update(f"{enabled} / {len(self._skills)} enabled")
+            badges.display = True
+        elif section_id == "rules":
+            enabled = sum(1 for _name, _desc, on in self._rules if on)
+            primary.update(
+                Text.assemble(
+                    ("● ", "green"),
+                    (
+                        f"{len(self._rules)} rule"
+                        f"{'s' if len(self._rules) != 1 else ''} loaded",
+                        "dim",
+                    ),
+                )
+            )
+            secondary.update(f"{enabled} / {len(self._rules)} enabled")
+            badges.display = True
+        elif section_id == "memory":
+            long_term = self._memory.get("long_term") or {}
+            lessons = self._memory.get("lessons") or {}
+            daily = self._memory.get("daily") or {}
+            sources = 1 if long_term.get("exists") else 0
+            sources += 1 if lessons.get("exists") else 0
+            sources += 1 if int(daily.get("days") or 0) else 0
+            primary.update(
+                Text.assemble(
+                    ("● ", "green"),
+                    (f"{sources} sources", "dim"),
+                )
+            )
+            secondary.update(f"{int(long_term.get('count') or 0)} entries")
+            badges.display = True
+        elif section_id == "mcp":
+            connected = sum(1 for _name, _kind, on in self._mcp_servers if on)
+            enabled = sum(1 for _s, _n, _d, on in self._mcp_tools if on)
+            primary.update(
+                Text.assemble(
+                    ("● ", "green"),
+                    (
+                        f"{connected} server{'s' if connected != 1 else ''} connected",
+                        "dim",
+                    ),
+                )
+            )
+            secondary.update(f"{enabled} / {len(self._mcp_tools)} enabled")
+            badges.display = True
+        elif section_id == "tokens":
+            primary.update(
+                Text.assemble(
+                    ("● ", "green"),
+                    (
+                        "Snapshot"
+                        if self._tokens.get("available")
+                        else "Unavailable",
+                        "dim",
+                    ),
+                )
+            )
+            secondary.update(str(self._tokens.get("model") or "—"))
+            badges.display = True
+        elif section_id == "preference":
+            mode = "Concise" if self._display_mode == "concise" else "Developer"
+            primary.update(
+                Text.assemble(
+                    ("● ", "green"),
+                    (mode, "dim"),
+                )
+            )
+            secondary.update("next turn")
+            badges.display = True
+        else:
             badges.display = False
-            return
-        builder(primary, secondary)
-        badges.display = True
-
-    def _badge_skills(self, primary: Static, secondary: Static) -> None:
-        enabled = sum(1 for _name, _desc, on in self._skills if on)
-        primary.update(
-            Text.assemble(
-                ("● ", "green"),
-                (f"{len(self._skills)} skills loaded", "dim"),
-            )
-        )
-        secondary.update(f"{enabled} / {len(self._skills)} enabled")
-
-    def _badge_rules(self, primary: Static, secondary: Static) -> None:
-        total = len(self._rules)
-        enabled = sum(1 for _name, _desc, on in self._rules if on)
-        noun = "rule" if total == 1 else "rules"
-        primary.update(
-            Text.assemble(("● ", "green"), (f"{total} {noun} loaded", "dim"))
-        )
-        secondary.update(f"{enabled} / {total} enabled")
-
-    def _badge_memory(self, primary: Static, secondary: Static) -> None:
-        long_term = self._memory.get("long_term") or {}
-        lessons = self._memory.get("lessons") or {}
-        daily = self._memory.get("daily") or {}
-        sources = 1 if long_term.get("exists") else 0
-        sources += 1 if lessons.get("exists") else 0
-        sources += 1 if int(daily.get("days") or 0) else 0
-        primary.update(
-            Text.assemble(("● ", "green"), (f"{sources} sources", "dim"))
-        )
-        secondary.update(f"{int(long_term.get('count') or 0)} entries")
-
-    def _badge_mcp(self, primary: Static, secondary: Static) -> None:
-        connected = sum(1 for _name, _kind, on in self._mcp_servers if on)
-        enabled = sum(1 for _s, _n, _d, on in self._mcp_tools if on)
-        noun = "server" if connected == 1 else "servers"
-        primary.update(
-            Text.assemble(
-                ("● ", "green"),
-                (f"{connected} {noun} connected", "dim"),
-            )
-        )
-        secondary.update(f"{enabled} / {len(self._mcp_tools)} enabled")
-
-    def _badge_tokens(self, primary: Static, secondary: Static) -> None:
-        label = "Snapshot" if self._tokens.get("available") else "Unavailable"
-        primary.update(Text.assemble(("● ", "green"), (label, "dim")))
-        secondary.update(str(self._tokens.get("model") or "—"))
-
-    def _badge_preference(self, primary: Static, secondary: Static) -> None:
-        mode = "Concise" if self._display_mode == "concise" else "Developer"
-        primary.update(Text.assemble(("● ", "green"), (mode, "dim")))
-        secondary.update("next turn")
 
     def on_status_dot_changed(self, event: StatusDot.Changed) -> None:
         widget_id = event.dot.id or ""

@@ -1,4 +1,4 @@
-"""启动遮罩：ALEXCODE 字符画、渐变色与阶段进度。"""
+"""启动遮罩：ALEX 字符画、渐变色与阶段进度。"""
 
 from __future__ import annotations
 

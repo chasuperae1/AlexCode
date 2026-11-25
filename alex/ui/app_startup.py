@@ -40,7 +40,7 @@ class StartupMixin:
             self.query_one("#loading", LoadingOverlay).update_stages(
                 stages, self._boot_frame
             )
-        except Exception:  # 遮罩已卸载时停止更新
+        except Exception:
             pass
 
     def _hide_loading(self) -> None:
@@ -49,7 +49,7 @@ class StartupMixin:
         self._loading_visible = False
         try:
             self.query_one("#loading", LoadingOverlay).remove()
-        except Exception:  # 遮罩已卸载
+        except Exception:
             pass
 
     async def _initialize(self) -> None:
@@ -71,6 +71,7 @@ class StartupMixin:
         self.link.on_event(self._on_session_event)
         if isinstance(self.link, DaemonClient):
             self.link.on_close(self._on_link_closed)
+            self.link.on_lost(self._on_link_lost)
         try:
             await self.link.startup()
         except Exception as exc:
@@ -82,13 +83,16 @@ class StartupMixin:
         self._hide_loading()
         try:
             self.query_one("#prompt", PromptInput).disabled = False
-        except Exception:  # 输入框未挂载时忽略
+        except Exception:
             pass
         self.notify(
             f"Init failed: {message}", title="Init failed", severity="error", timeout=10
         )
 
     def _on_link_closed(self) -> None:
+        if self._healing:
+            # 断链后正在后台重连：先不提示断开，接回去会发 “Reconnected”
+            return
         self.notify(
             "Disconnected from the background session",
             title="Disconnected",
@@ -96,34 +100,70 @@ class StartupMixin:
             timeout=8,
         )
 
+    def _on_link_lost(self) -> None:
+        """传输层断开（超限行、心跳超时）：后台重连，用 resync 补事件。"""
+        if self._healing:
+            return
+        self._healing = True
+        self.run_worker(self._heal_link(), group="link", exclusive=True)
+
+    async def _heal_link(self) -> None:
+        try:
+            await self._reconnect(resume=True)
+        except (LinkError, OSError, asyncio.TimeoutError) as exc:
+            self.notify(
+                f"Reconnect failed: {exc}",
+                title="Disconnected",
+                severity="error",
+                timeout=10,
+            )
+        finally:
+            self._healing = False
+
     async def _rpc(self, method: str, **params):
         """调用会话；连接失效时自动重连并重试一次。"""
         if method != "describe":
             self._settings_cache = None
         if self.link is None:
-            await self._reconnect()
+            await self._reconnect(resume=True)
         try:
             return await self.link.rpc(method, **params)
         except LinkError:
-            await self._reconnect()
+            await self._reconnect(resume=True)
             return await self.link.rpc(method, **params)
 
-    async def _reconnect(self) -> None:
-        old = self.link
-        if isinstance(old, DaemonClient):
+    async def _reconnect(self, resume: bool = False) -> None:
+        """重建连接；resume 让同一个 daemon 用 resync 补发断开期间的事件。
+
+        断链与 RPC 失败可能同时触发重连，用锁串行化，避免两条连接互相顶掉。
+        """
+        async with self._link_lock:
+            if isinstance(self.link, DaemonClient) and self.link.is_open:
+                return  # 并发的另一次重连已经建好连接
+            old = self.link
+            token = (
+                old.resume_token()
+                if resume and isinstance(old, DaemonClient)
+                else None
+            )
+            if isinstance(old, DaemonClient):
+                try:
+                    await old.close()
+                except Exception:
+                    pass
             try:
-                await old.close()
-            except Exception:  # 旧连接关闭失败不影响重连
-                pass
-        try:
-            self.link = await _facade().ensure_daemon(ROOT)
-        except (LinkError, OSError, asyncio.TimeoutError) as exc:
-            self.link = None
-            raise LinkError(f"reconnect failed: {exc}") from exc
-        self.link.on_event(self._on_session_event)
-        if isinstance(self.link, DaemonClient):
-            self.link.on_close(self._on_link_closed)
-        await self.link.startup()
+                if token is not None:
+                    self.link = await _facade().ensure_daemon(ROOT, resume=token)
+                else:
+                    self.link = await _facade().ensure_daemon(ROOT)
+            except (LinkError, OSError, asyncio.TimeoutError) as exc:
+                self.link = None
+                raise LinkError(f"reconnect failed: {exc}") from exc
+            self.link.on_event(self._on_session_event)
+            if isinstance(self.link, DaemonClient):
+                self.link.on_close(self._on_link_closed)
+                self.link.on_lost(self._on_link_lost)
+            await self.link.startup()
         self.notify("Reconnected to the background session", timeout=2)
 
     def _on_session_event(self, kind: str, data: dict) -> None:

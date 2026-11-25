@@ -142,7 +142,7 @@ class BootMixin:
         self.emit(
             "history_reset",
             {
-                "history": self._history_payload(),
+                **self._history_view(),
                 "checkpoints": [asdict(item) for item in self._checkpoints],
             },
         )

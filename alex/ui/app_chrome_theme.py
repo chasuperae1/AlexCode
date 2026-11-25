@@ -12,12 +12,21 @@ from alex.ui.themes import THEMES, next_theme, theme_label, theme_name
 class ChromeThemeMixin:
     """主题切换与主题选择器。"""
 
-    def watch_theme(self) -> None:
-        # Markdown 与事件行都按主题变量着色，切换主题后整体重建；
-        # 正在展示的权限卡留在原处就地换色（见 _render_history），不会消失
-        card = getattr(self, "_permission_card", None)
-        if card is not None and hasattr(card, "set_theme"):
-            card.set_theme(self.current_theme)
+    def _on_theme_changed(self, theme) -> None:
+        """Textual 应用完主题后再重渲染。
+
+        ``theme_changed_signal`` 发出时 ``theme_variables`` 已经换成新主题；
+        而 ``watch_theme`` 那一 tick 里 ``app.theme_variables`` 还是旧值，
+        在里面即时重排会把旧配色再套一遍（切主题看起来"没生效"）。
+        """
+        context = getattr(self, "render_context", None)
+        theme_id = getattr(theme, "name", "") or str(self.theme)
+        if context is not None:
+            # 换过的主题渲染结果留在 LRU 里，切回去是零解析
+            context.set_theme(str(theme_id))
+        if self._permission_pending:
+            # 重建会清空聊天区，把尚未回应的权限卡一起抹掉
+            return
         self._render_history()
 
     def action_cycle_theme(self) -> None:
@@ -27,6 +36,13 @@ class ChromeThemeMixin:
     def _set_theme(self, name: str, *, notify: bool = True) -> None:
         if name not in THEMES:
             return
+        if self._permission_pending and name != self.theme:
+            self.notify(
+                "Permission required — resolve it before changing theme",
+                severity="warning",
+                timeout=3,
+            )
+            return
         self.theme = name
         if _load_ui_state().get("theme") != name:
             _save_ui_state(theme=name)
@@ -34,7 +50,7 @@ class ChromeThemeMixin:
             self.notify(f"Theme: {theme_label(name)}", timeout=2)
         try:
             self.query_one("#workspace-line", Static).update(self._workspace_line())
-        except Exception:  # 控件未挂载时跳过
+        except Exception:
             pass
 
     def _open_theme_picker(self) -> None:

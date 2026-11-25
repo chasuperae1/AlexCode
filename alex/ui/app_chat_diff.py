@@ -125,6 +125,8 @@ class ChatDiffMixin:
             "result_text": str(data.get("text") or ""),
             "exit_code": int(data.get("exit_code", 0 if ok else 1) or 0),
             "stdout": stdout,
+            "output_path": str(data.get("output_path") or ""),
+            "line_count": int(data.get("line_count", 0) or 0),
         }
         card = ShellPermissionCard(
             payload,
@@ -136,6 +138,8 @@ class ChatDiffMixin:
             stdout,
             exit_code=payload["exit_code"],
             failed=not ok,
+            path=payload["output_path"],
+            line_count=payload["line_count"],
         )
         chat.add_widget(card)
 

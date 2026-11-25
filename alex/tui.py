@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
 
@@ -28,6 +29,7 @@ from alex.ui.app_style import APP_CSS
 from alex.ui.boot import LoadingOverlay
 from alex.ui.constants import ASSISTANT, PROMPT_PLACEHOLDER, USER  # noqa: F401
 from alex.ui.panels import ChatLog, GoalCard, QueueCard
+from alex.ui.render_context import RenderContext
 from alex.ui.sources import SourceState, load_sources
 from alex.ui.state import _load_ui_state
 from alex.ui.themes import DEFAULT_THEME, THEMES
@@ -119,6 +121,9 @@ class AlexApp(StartupMixin, EventsMixin, ChatMixin, ChromeMixin, InputMixin, Ter
 
         # 当前正文块从 stream_text 的哪个位置开始（回答选择题后另起一块）
         self._stream_offset = 0
+        # 流式阶段已经冻结成独立控件的前缀块，以及冻结到的绝对偏移
+        self._stream_frozen: list = []
+        self._stream_frozen_upto = 0
 
         # 本轮是否收到过正文增量（没有时在结束时用全文兜底）
         self._turn_text_streamed = False
@@ -151,6 +156,9 @@ class AlexApp(StartupMixin, EventsMixin, ChatMixin, ChromeMixin, InputMixin, Ter
         self._mcp_tools_by_server: dict[str, list[str]] = {}
         self.link = None
         self._no_daemon = False
+        # 断链后的后台重连：同一时刻只跑一条，_rpc 兜底重连时共用这把锁
+        self._healing = False
+        self._link_lock = asyncio.Lock()
         self._busy = False
         self._backend = None
 
@@ -161,6 +169,8 @@ class AlexApp(StartupMixin, EventsMixin, ChatMixin, ChromeMixin, InputMixin, Ter
         self._meta_base = ""
         self._workspace = str(workspace_path())  # 跟随 daemon 推送实时更新
         self._sources: SourceState = load_sources()
+        # 会话级渲染上下文：Markdown 的宽度 / 主题 / epoch 与渲染缓存的唯一来源
+        self.render_context = RenderContext(self)
 
     def _init_interaction_state(self) -> None:
         self._confirm_screen = None
@@ -256,6 +266,11 @@ class AlexApp(StartupMixin, EventsMixin, ChatMixin, ChromeMixin, InputMixin, Ter
             self.register_theme(spec.to_textual_theme())
         saved = str(_load_ui_state().get("theme") or CONFIG.get("theme") or "")
         self.theme = saved if saved in THEMES else DEFAULT_THEME
+        context = getattr(self, "render_context", None)
+        if context is not None:
+            context.set_theme(str(self.theme), broadcast=False)
+        # 主题重渲染只在 Textual 应用完主题后做一次：块不再各自订阅信号
+        self.theme_changed_signal.subscribe(self, self._on_theme_changed)
         self.set_interval(0.15, self._flush_stream)
         self.set_interval(0.2, self._tick_spinner)
         self.set_interval(1.0, self._tick_task_status)

@@ -10,7 +10,7 @@ def stop_timer(timer: Any) -> None:
     if timer is not None:
         try:
             timer.stop()
-        except Exception:  # 计时器可能已被回收
+        except Exception:
             pass
     return None
 

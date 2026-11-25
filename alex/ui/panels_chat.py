@@ -68,6 +68,7 @@ class CompactionBlock(Vertical):
         theme,
         *,
         width: int = 0,
+        context=None,
     ) -> None:
         super().__init__(classes="compaction-block")
         self._theme = theme
@@ -75,7 +76,13 @@ class CompactionBlock(Vertical):
         self._collapsed = True
         self._title = Static(classes="compaction-title")
         self._body = (
-            MarkdownStatic(body, classes="md compaction-body", app=None, width=width)
+            MarkdownStatic(
+                body,
+                classes="md compaction-body",
+                app=None,
+                width=width,
+                context=context,
+            )
             if body.strip()
             else None
         )
@@ -167,6 +174,9 @@ class ChatLog(VerticalScroll):
         background: $background;
         margin: 0 0 1 0;
         padding: 0;
+    }
+    ChatLog .stream-hidden {
+        color: $text-muted;
     }
     ChatLog .role {
         color: $primary;
@@ -302,6 +312,21 @@ class ChatLog(VerticalScroll):
 
     def compose(self) -> ComposeResult:
         yield Vertical(id="chat-body")
+
+    def on_resize(self, event) -> None:
+        # 聊天区宽度是 Markdown 排版的唯一来源：布局定下来后写进渲染上下文，
+        # 块跟着统一重排（同一宽度同一份源文本只会解析一次）。
+        self.call_after_refresh(self.sync_render_width)
+
+    def sync_render_width(self) -> None:
+        try:
+            body = self.query_one("#chat-body")
+        except Exception:  # compose 还没完成
+            return
+        context = getattr(self.app, "render_context", None)
+        if context is None:
+            return
+        context.set_width(int(body.content_region.width or body.size.width or 0))
 
     def clear(self, keep=None) -> None:
         """清空聊天区；``keep`` 指定的控件原地保留（未决权限卡等）。"""

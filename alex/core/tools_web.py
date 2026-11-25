@@ -147,14 +147,14 @@ class TrackedLocalBackend(LocalBackend):
                     killer.kill()
                     try:
                         await asyncio.wait_for(killer.wait(), timeout=1)
-                    except asyncio.TimeoutError:  # 强杀后仍不退出：进程已不可控，放弃等待
+                    except asyncio.TimeoutError:
                         pass
             else:
                 os.killpg(os.getpgid(process.pid), signal.SIGKILL)
         except (ProcessLookupError, OSError):
             try:
                 process.kill()
-            except ProcessLookupError:  # 进程已自行退出
+            except ProcessLookupError:
                 pass
         try:
             await asyncio.wait_for(process.wait(), timeout=2)
@@ -162,9 +162,9 @@ class TrackedLocalBackend(LocalBackend):
             try:
                 process.kill()
                 await asyncio.wait_for(process.wait(), timeout=1)
-            except (asyncio.TimeoutError, ProcessLookupError):  # 强杀后仍不退出，放弃
+            except (asyncio.TimeoutError, ProcessLookupError):
                 pass
-        except ProcessLookupError:  # 进程已退出，无需等待
+        except ProcessLookupError:
             pass
 
     async def kill_all(self) -> None:

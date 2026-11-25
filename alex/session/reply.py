@@ -10,7 +10,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from alex.config import CONFIG, workspace_path
+from alex.config import CONFIG, ROOT, workspace_path
 from alex.core.images import build_user_message
 from alex.core.snapshots import Checkpoint, checkpoint_index, now_label
 
@@ -20,6 +20,11 @@ from alex.session.common import (
     USER,
     record_payload,
 )
+
+# shell 结果进 history 的只有首尾各这么多行，其余落盘到 data/shell/<id>.txt
+_SHELL_PREVIEW_LINES = 30
+_SHELL_OFFLOAD_CHARS = 2000
+_SHELL_RETENTION_DAYS = 7
 
 
 @dataclass
@@ -198,6 +203,8 @@ class ReplyMixin:
 
     def _begin_turn(self) -> None:
         self._stopping = False
+        # 新一轮开始：上一轮留下的停止意图就此作废
+        self._stop_pending = False
         self._busy = True
         self._phase = "running"
         self._activity = ""
@@ -246,6 +253,20 @@ class ReplyMixin:
         run.final_text = f"(Request failed: {exc})"
 
     async def _finish_reply(self, run: _ReplyRun, content: str) -> None:
+        """一轮的收尾：写历史、落盘、记检查点，最后才放行下一轮。
+
+        收尾本身也算这一轮的一部分。以前在这里先把 ``_busy`` 降下来、
+        清掉 ``_reply_task`` 再去 ``await save_state``，那个 await 就是一个
+        敞开的口子：submit 看见“空闲”就接了新消息，于是旧轮次的 stats /
+        changes 落到新轮次的下面（``assistant, user, stats``）。
+        """
+        self._finishing = True
+        try:
+            await self._close_turn(run, content)
+        finally:
+            self._release_turn()
+
+    async def _close_turn(self, run: _ReplyRun, content: str) -> None:
         self._flush_deltas()
         self.stream_text = ""
         if run.interrupted:
@@ -258,10 +279,6 @@ class ReplyMixin:
             self.history.append((kind, run.final_text))
         self._activity = ""
         self._stopping = False
-        # 队列执行期间保持忙碌，避免任务之间的空档解锁输入框
-        self._busy = self._queue_active
-        self._phase = "running" if self._queue_active else "idle"
-        self._reply_task = None
         from alex.core.agent import save_state
 
         try:
@@ -322,14 +339,27 @@ class ReplyMixin:
                 **({"record": records} if records else {}),
             },
         )
+        self._refresh_tasks()
+        asyncio.create_task(self._update_meta())
+        if run.before and run.store is not None:
+            # 检查点必须在本轮边界内记完再放行。它是唯一在本轮之外追加
+            # changes 记录的地方：留在后台跑，下一轮一起步就会把上一轮的
+            # changes 划进新一轮（卡片挂到别人的回合下面）。
+            try:
+                await self._record_checkpoint(run, content, stats)
+            except Exception:  # 检查点失败只影响 diff 卡，不阻断收尾
+                pass
+
+    def _release_turn(self) -> None:
+        """放行下一轮：这是清洁点，之后再没有本轮的写操作排着队。"""
+        self._finishing = False
+        self._reply_task = None
+        self._stopping = False
+        # 队列执行期间保持忙碌，避免任务之间的空档解锁输入框
+        self._busy = self._queue_active
+        self._phase = "running" if self._queue_active else "idle"
         self._emit_status()
         self._refresh_tasks()
-        self.emit("tasks", self._tasks_payload())
-        if run.before and run.store is not None:
-            asyncio.create_task(
-                self._record_checkpoint(run, content, stats)
-            )
-        asyncio.create_task(self._update_meta())
 
     # ---- 事件处理 ----
 
@@ -448,7 +478,9 @@ class ReplyMixin:
         text = f"{label} {'done' if ok else state} · {elapsed:.1f}s"
         shell = name in {"PowerShell", "Bash", "Cmd", "Shell"}
         result_text = self._tool_result_text(event.tool_call_id) if shell else ""
-        stats = self._shell_stats(result_text, ok) if shell else {}
+        stats = (
+            self._shell_stats(result_text, ok, event.tool_call_id) if shell else {}
+        )
         payload = None
         if shell:
             payload = {
@@ -493,6 +525,7 @@ class ReplyMixin:
                 "stdout": stats.get("stdout", ""),
                 "line_count": stats.get("line_count", 0),
                 "exit_code": stats.get("exit_code"),
+                "output_path": stats.get("output_path", ""),
                 **record,
             },
         )
@@ -548,7 +581,16 @@ class ReplyMixin:
         return str(value)
 
     @staticmethod
-    def _shell_stats(text: str, ok: bool) -> dict[str, Any]:
+    def _shell_stats(
+        text: str,
+        ok: bool,
+        tool_call_id: str = "",
+    ) -> dict[str, Any]:
+        """shell 结果只留首尾各 30 行，全文落到 data/shell/<id>.txt 按需读。
+
+        整段 stdout 进 history 的代价是翻倍的：留一份在内存、json 再写一遍、
+        事件日志再抄一遍，2 万字符一次调用就够把长会话撑住。
+        """
         clean = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
         lines = [line for line in clean.splitlines() if line.strip()]
         exit_code: int | None = None
@@ -561,11 +603,63 @@ class ReplyMixin:
                 break
         if exit_code is None:
             exit_code = 0 if ok else 1
+        hidden = len(lines) > _SHELL_PREVIEW_LINES * 2
+        preview = clean
+        if hidden:
+            skipped = len(lines) - _SHELL_PREVIEW_LINES * 2
+            preview = "\n".join(
+                lines[:_SHELL_PREVIEW_LINES]
+                + [f"… ({skipped} lines hidden) …"]
+                + lines[-_SHELL_PREVIEW_LINES:]
+            )
+        output_path = ""
+        if clean and (hidden or len(clean) > _SHELL_OFFLOAD_CHARS):
+            output_path = ReplyMixin._write_shell_output(tool_call_id, clean)
         return {
-            "stdout": clean[:20000],
+            "stdout": preview,
             "line_count": len(lines),
             "exit_code": exit_code,
+            "output_path": output_path,
         }
+
+    @staticmethod
+    def _write_shell_output(tool_call_id: str, text: str) -> str:
+        """全文落盘，返回相对项目根的 posix 路径（写不进去就返回空串）。"""
+        stem = re.sub(r"[^0-9A-Za-z._-]", "_", str(tool_call_id or "")).strip("._")
+        stem = stem[:80] or f"shell-{int(time.time() * 1000)}"
+        directory = ROOT / "data" / "shell"
+        path = directory / f"{stem}.txt"
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+        except OSError:
+            return ""
+        ReplyMixin._prune_shell_outputs(directory)
+        try:
+            return path.relative_to(ROOT).as_posix()
+        except ValueError:  # 项目根之外的路径（改过 data 目录时）
+            return path.as_posix()
+
+    _shell_outputs_pruned = False
+
+    @classmethod
+    def _prune_shell_outputs(cls, directory: Path) -> None:
+        """每个进程只清一次：外置输出和事件日志一样按天老化，不无限堆积。"""
+        if cls._shell_outputs_pruned:
+            return
+        cls._shell_outputs_pruned = True
+        cutoff = time.time() - _SHELL_RETENTION_DAYS * 86400
+        try:
+            entries = list(directory.glob("*.txt"))
+        except OSError:
+            return
+        for path in entries:
+            try:
+                if path.stat().st_mtime < cutoff:
+                    path.unlink()
+            except OSError:  # 正被读的跳过，下次再清
+                continue
+
 
 
     def _on_model_call_end(self, event: Any, run: _ReplyRun) -> None:

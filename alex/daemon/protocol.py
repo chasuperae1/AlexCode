@@ -17,6 +17,11 @@ from typing import Any
 
 PROTOCOL_VERSION = 1
 MAX_LINE_BYTES = 8 * 1024 * 1024
+# 服务端事件环形缓冲的容量：断链重连后能补上的事件条数上限。
+# 客户端据此判断 resync 是否够覆盖断开期间的缺口。
+EVENT_BUFFER_SIZE = 2000
+# 客户端心跳间隔：超过两个周期没有 pong 就按断链处理。
+CLIENT_PING_SECONDS = 20.0
 
 # 客户端 → 服务端
 MSG_HELLO = "hello"
@@ -29,6 +34,7 @@ MSG_HELLO_OK = "hello_ok"
 MSG_SNAPSHOT = "snapshot"
 MSG_EVENT = "event"
 MSG_RPC_RESULT = "rpc_result"
+MSG_PONG = "pong"
 MSG_BYE = "bye"
 
 # RPC 错误码

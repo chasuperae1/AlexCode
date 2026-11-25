@@ -12,7 +12,7 @@ from typing import Any, Awaitable, Callable
 
 from agentscope.message import TextBlock
 from agentscope.permission import PermissionBehavior, PermissionDecision
-from agentscope.tool import ToolBase, ToolChunk
+from agentscope.tool import TaskCreate, ToolBase, ToolChunk
 from agentscope.tool._response import ToolResultState
 
 from alex.core.permissions import is_dangerous_command, is_locked_skill_path  # noqa: F401
@@ -26,6 +26,34 @@ _WRITE_INTENT = re.compile(
     r"|\bset-content\b|\bout-file\b|\bremove-item\b|\bnew-item\b)",
     re.IGNORECASE,
 )
+
+
+# 框架自带的 TaskCreate 描述只要求“3 步以上才建清单”，模型据此往往把几十个
+# 可独立验收的单元压成 7-8 个大任务。这里在原描述后追加粒度要求，避免重复写
+# 一份完整描述（原描述里的“何时用/何时不用”仍然有效）。
+_TASK_GRANULARITY = """
+
+## Granularity
+
+Prefer many small tasks over a few broad ones. One task per unit of work, where
+a unit is the smallest thing that can be verified on its own: one test case,
+one file, one function, one fixture, one endpoint, one doc section, one
+scenario to reproduce. Merge units only when they are the same operation on the
+same file and would be checked together, and state which units a task covers
+("parser cases 41-45"). Never merge different files, subsystems or failure
+domains.
+
+Concrete targets: 100 test cases -> 20-100 tasks; a 12-file refactor -> one task
+per file plus verification; a spec with N bullet requirements -> at least N
+tasks. A plan that covers dozens of checkable units with 7-8 tasks is too
+coarse - split it further. Each task must still be finishable in one reply.
+"""
+
+
+class PlanTaskCreate(TaskCreate):
+    """TaskCreate 加细粒度要求：单元数量决定任务数量，别把工作压成大块。"""
+
+    description: str = TaskCreate.description + _TASK_GRANULARITY
 
 
 class Cmd(ToolBase):

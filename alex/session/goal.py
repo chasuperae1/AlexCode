@@ -28,12 +28,7 @@ class GoalMixin(GoalPipelineMixin):
         await self._wait_ready(timeout=30)
         if self.agent is None or self._model is None:
             raise SessionError("not_ready", "session is not ready")
-        if (
-            self._busy
-            or self._queue_active
-            or self._goal_confirming
-            or self._goal_state is not None
-        ):
+        if self._turn_open() or self._goal_state is not None:
             raise SessionError("busy", "a reply is already running")
         if not text.strip():
             raise SessionError("internal", "empty goal")

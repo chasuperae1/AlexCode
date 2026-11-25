@@ -87,6 +87,10 @@ class InputSettingsMixin:
         # 当前界面的中间 assistant 文本、已作答 ask 行冲掉（history 里未必
         # 都有对应记录）。
         if changed:
+            # 设置可能改了主题变量 / 字号：缓存里的渲染结果不再是同一份样式
+            context = getattr(self, "render_context", None)
+            if context is not None:
+                context.invalidate()
             self._render_history()
         elif self.view.thinking:
             # 不重建聊天区时，Textual 的 Collapsible 正文可能停留在弹层

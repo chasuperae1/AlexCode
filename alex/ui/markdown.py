@@ -354,15 +354,43 @@ class MarkdownStatic(Static):
     ``width`` 用于历史重建：此时控件还没挂载、拿不到 ``content_region``，
     但聊天区宽度已经确定，提前按这个宽度排好版，挂上去的第一帧就有正文，
     不会出现“整块空白再慢慢填字”的闪烁。
+
+    宽度与主题都不再由这个块自己维护：归属的 ``RenderContext`` 统一广播
+    变化，渲染结果走它的 LRU，换主题 / 拖窗口不再让每个块各解析一遍。
     """
 
-    def __init__(self, renderable="", *, app=None, width: int = 0, **kwargs) -> None:
+    def __init__(
+        self,
+        renderable="",
+        *,
+        app=None,
+        width: int = 0,
+        context=None,
+        **kwargs,
+    ) -> None:
         super().__init__(Text(""), **kwargs)
         self._markdown: str | None = None
         self._render_width = -1
+        self._render_epoch = -1
         self._host_app = app
         self._hint_width = int(width or 0)
+        # 注意：不能叫 ``_context``——``MessagePump._context`` 是消息泵自己
+        # 的上下文管理器，同名实例属性会把它覆盖掉，挂载时直接 TypeError。
+        self._render_ctx = context
         self.update(renderable)
+
+    @property
+    def render_context(self):
+        """优先用构造时给的上下文，其次是宿主 app 上的会话级上下文。"""
+        if self._render_ctx is not None:
+            return self._render_ctx
+        ctx = getattr(self._host_app, "render_context", None)
+        if ctx is not None:
+            return ctx
+        try:
+            return getattr(self.app, "render_context", None)
+        except Exception:  # 还没挂到 app 上
+            return None
 
     def update(self, renderable="", **kwargs) -> None:
         if isinstance(renderable, str):
@@ -374,10 +402,10 @@ class MarkdownStatic(Static):
         super().update(renderable, **kwargs)
 
     def on_mount(self) -> None:
-        self.app.theme_changed_signal.subscribe(self, self._on_theme_changed)
+        context = self.render_context
+        if context is not None:
+            context.attach(self)
         # 已经按历史重建时的宽度排好版就不要重排一遍，宽度不变时渲染结果相同。
-        if self._render_width <= 0:
-            self._render_width = -1
         self._render_markdown()
         # 刚挂载时 content_region 还是 0，拿不到宽度就只画出一个空行；
         # 挂在滚动容器末尾的块（新消息、翻回最新）随后尺寸恰好不变，
@@ -385,14 +413,12 @@ class MarkdownStatic(Static):
         self.call_after_refresh(self._render_after_layout)
 
     def on_unmount(self) -> None:
-        try:
-            self.app.theme_changed_signal.unsubscribe(self)
-        except Exception:  # 信号已断开时忽略
-            pass
+        context = self.render_context
+        if context is not None:
+            context.detach(self)
 
-    def _on_theme_changed(self, theme) -> None:
-        # Markdown 在 Rich 阶段已经固定了颜色，换主题后必须重排一次。
-        self._render_width = -1
+    def on_render_context_changed(self) -> None:
+        """上下文换了宽度或主题：按缓存重排一次。"""
         self._render_markdown()
 
     def _render_after_layout(self) -> None:
@@ -402,21 +428,38 @@ class MarkdownStatic(Static):
         self._render_markdown()
 
     def on_resize(self, event) -> None:
-        # 宽度变化要重新排版，否则长行折行位置会错
+        # 块自己的宽度跟聊天区不一致时（缩进、卡片内嵌）以实测宽度为准，
+        # 否则长行折行位置会错；与上下文宽度一致时这次调用是空转。
         if self._markdown is not None:
             self._render_markdown(event.size.width)
 
     def _render_markdown(self, width: int | None = None) -> None:
         if self._markdown is None:
             return
+        context = self.render_context
         if width is None:
-            width = self.content_region.width or self.size.width
+            measured = 0
+            try:
+                if self.is_mounted:
+                    measured = int(
+                        self.content_region.width or self.size.width or 0
+                    )
+            except Exception:  # 布局信息还没就绪
+                measured = 0
+            width = measured or (context.width if context is not None else 0)
         if width <= 0:
             # 还没布局：历史重建时用已知的聊天区宽度先排好，别的场景保持原行为。
             width = self._hint_width
-        if width <= 0 or width == self._render_width:
+        if width <= 0:
+            return
+        epoch = context.epoch if context is not None else -1
+        if width == self._render_width and epoch == self._render_epoch:
             return
         self._render_width = width
+        self._render_epoch = epoch
+        if context is not None:
+            super().update(context.render(self._markdown, width))
+            return
         host = self._host_app
         if host is None:
             try:

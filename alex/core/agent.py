@@ -35,7 +35,6 @@ from agentscope.tool import (
     LocalBackend,
     PowerShell,
     Read,
-    TaskCreate,
     TaskGet,
     TaskList,
     TaskUpdate,
@@ -60,7 +59,7 @@ from alex.core.permissions import (
 )
 from alex.core.reasoning import request_parameters
 from alex.core.subagents import Subagent
-from alex.core.tools import AskCallback, AskUser, Cmd, WebSearch
+from alex.core.tools import AskCallback, AskUser, Cmd, PlanTaskCreate, WebSearch
 
 
 class ThinkingSafeDeepSeekModel(DeepSeekChatModel):
@@ -110,8 +109,8 @@ def build_toolkit(backend: LocalBackend, mcps: list[MCPClient]) -> Toolkit:
         PowerShell(cwd=workspace, backend=backend)
         if os.name == "nt"
         else None,
-        # 任务清单：框架内置，多步骤任务的进度跟踪
-        TaskCreate(),
+        # 任务清单：框架内置，多步骤任务的进度跟踪（描述按本项目加细粒度要求）
+        PlanTaskCreate(),
         TaskList(),
         TaskGet(),
         TaskUpdate(),

@@ -23,7 +23,7 @@ Built on [AgentScope](https://github.com/agentscope-ai/agentscope) and
 | **Long-term memory** | Every turn is logged per day, then merged in the background into `MEMORY.md`; you can clear, trim, or browse memory by date |
 | **Permission modes** | `accept` / `bypass` / `explore`; dangerous commands are matched against a regex table, and file edits are shown as an inline diff before confirmation |
 | **Goal mode** | `/goal <goal>` starts an executor + independent verifier loop that keeps fixing until the verifier passes |
-| **Task queue** | `/queue taskA; taskB` splits a request into tasks and runs them one after another with progress in the top bar |
+| **Task queue** | `/queue taskA; taskB` splits a request into fine-grained tasks (one per verifiable unit) and runs them one after another with progress in the top bar |
 | **Sub-agents** | The main agent can dispatch self-contained sub-agents; multiple calls in one reply run concurrently with isolated context |
 | **MCP** | Connects to stdio and http servers from `config/mcp_servers.json` concurrently; a failing server is skipped, not fatal |
 | **Skills / rules** | `skills/*/SKILL.md` is loaded on demand, `rules/*.md` is injected into the system prompt; both can be toggled in Settings |

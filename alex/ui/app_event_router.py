@@ -291,7 +291,11 @@ class EventRouterMixin:
         self._show_compacting(bool(data.get("active")))
 
     def _on_history_reset(self, data: dict) -> None:
-        self.view.reset_session(data.get("history", []))
+        self.view.reset_session(
+            data.get("history", []),
+            offset=int(data.get("history_start", 0) or 0),
+            total=data.get("history_total"),
+        )
         # 历史被整体替换（撤销/清空/重连）：窗口回到最新，旧下标已失效。
         self._window_start = None
         self._window_end = None
@@ -303,6 +307,9 @@ class EventRouterMixin:
             # 再重建一次，否则代码 diff 卡会因为缺少 checkpoint 而丢失。
             self._history_needs_checkpoints = True
         self._stream_offset = 0
+        self._stream_frozen = []
+        self._stream_frozen_upto = 0
+        self._stream_hidden_marker = None
         self._live_runs.clear()
         self._live_tool_data.clear()
         self._refresh_task_status()

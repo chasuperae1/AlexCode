@@ -77,8 +77,16 @@ class ChatViewState:
     thinking: str = ""
     checkpoints: list[Checkpoint] = field(default_factory=list)
     exchange_seq: int = 0
+    # 已加载区间在会话完整历史里的起点：翻到本地第一条时用它当 before 游标
+    history_offset: int = 0
+    history_total: int = 0
     # 去重索引：键是 "kind:key"，值是该记录在 history 里的下标
     _record_slots: dict[str, int] = field(default_factory=dict, repr=False)
+
+    @property
+    def has_earlier(self) -> bool:
+        """会话里还有没加载的更早记录。"""
+        return self.history_offset > 0
 
     def _reindex(self) -> None:
         """按当前 history 重建去重索引（快照/重放替换历史后必须重建）。"""
@@ -113,15 +121,37 @@ class ChatViewState:
         return True
 
     def apply_snapshot(self, data: dict) -> None:
-        """用会话快照整体覆盖本地投影。"""
-        self.history = [tuple(item) for item in data.get("history", [])]
-        self.stream_text = str(data.get("stream_text", "") or "")
-        self.thinking = str(data.get("thinking", "") or "")
+        """用会话快照整体覆盖本地投影。
+
+        ``resume`` 快照是断线续连时发来的：历史那段缺口由 resync 补发的事件
+        补齐，这里保留本地已加载的页（含往回翻的偏移），只更新其余状态。
+        """
+        if not data.get("resume"):
+            self.history = [tuple(item) for item in data.get("history", [])]
+            self.history_offset = int(data.get("history_start", 0) or 0)
+            self.history_total = int(data.get("history_total", 0) or 0) or (
+                self.history_offset + len(self.history)
+            )
+            self.stream_text = str(data.get("stream_text", "") or "")
+            self.thinking = str(data.get("thinking", "") or "")
         self.exchange_seq = int(data.get("exchange_seq", 0) or 0)
         self.checkpoints = [
             Checkpoint(**item) for item in data.get("checkpoints", []) or []
         ]
         self._reindex()
+
+    def prepend_history(self, items: list, start: int) -> int:
+        """把会话更早的一页接在本地历史前面，返回插入条数。
+
+        插入会让所有本地下标后移，调用方据此整体平移窗口。
+        """
+        added = [tuple(item) for item in items]
+        if not added:
+            return 0
+        self.history[0:0] = added
+        self.history_offset = max(0, int(start))
+        self._reindex()
+        return len(added)
 
     def begin_exchange(self, exchange_id: int, text: str) -> None:
         """新一轮开始：记录用户消息，清空上一轮的流式缓冲。"""
@@ -130,9 +160,21 @@ class ChatViewState:
         self.stream_text = ""
         self.thinking = ""
 
-    def reset_session(self, history: list[tuple[str, str]] | None = None) -> None:
-        """会话被清空或重放：替换历史并丢弃未完成的流。"""
+    def reset_session(
+        self,
+        history: list[tuple[str, str]] | None = None,
+        offset: int = 0,
+        total: int | None = None,
+    ) -> None:
+        """会话被清空或重放：替换历史并丢弃未完成的流。
+
+        ``offset`` 是这一页在会话完整历史里的起点，客户端据此继续往上翻。
+        """
         self.history = [tuple(item) for item in history or []]
+        self.history_offset = max(0, int(offset))
+        self.history_total = (
+            int(total) if total is not None else self.history_offset + len(self.history)
+        )
         self.stream_text = ""
         self.thinking = ""
         self._reindex()

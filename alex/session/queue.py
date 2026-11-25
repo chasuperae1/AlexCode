@@ -14,15 +14,61 @@ from alex.session.common import (
 )
 
 
+PLAN_PROMPT = (
+    "Plan a queue of small tasks for the request below.\n\n"
+    "The queue runs tasks strictly one after another, so each task may rely "
+    "on the output of the tasks before it, and each task must end with "
+    "something checkable (a command result, a diff, a passing test, a "
+    "written file).\n\n"
+    "Granularity — be aggressive, this is the whole point of a queue:\n"
+    "- Count the units of work before you write anything. A unit is the "
+    "smallest thing that can be verified on its own: one test case, one test "
+    "file, one fixture, one function or module, one endpoint, one migration, "
+    "one doc section, one scenario to reproduce, one config key.\n"
+    "- Aim for one task per unit. Merge units only when they are the same "
+    "operation on the same file or area and would be verified together — then "
+    'say which units it covers in the subject (e.g. "parser cases 41-45"). '
+    "Never merge different files, subsystems or failure domains into one "
+    "task.\n"
+    "- Numbers to hit: 100 test cases -> 20-100 tasks (around 20 when "
+    "adjacent cases share one fixture and are batched by five, up to 100 when "
+    "each case stands alone); refactoring a 12-file module -> 12 or more "
+    "tasks, one per file, plus a verification task; a spec with N bullet "
+    "requirements -> at least N tasks.\n"
+    "- If your plan has 7-8 tasks for work that clearly contains dozens of "
+    "checkable units, it is too coarse — split it further before you answer. "
+    "A long explicit queue beats a short vague one: 40 small tasks beat 6 "
+    "broad ones. Keep the total under about 100 by batching adjacent "
+    "identical units.\n"
+    "- Stop only when the remaining items would be trivial busywork that "
+    "needs no separate verification.\n"
+    "- Each task must still be finishable within one reply.\n"
+    "- Call TaskCreate once per task, in the order they should run. Do not "
+    "skip planning because a step builds on an earlier one: sequential "
+    "execution covers it.\n"
+    "- Do not start any task now.\n\n"
+    "Request:\n{text}"
+)
+
+
+def plan_prompt(text: str) -> str:
+    """队列规划的完整指令：任务点数由「可独立验收的单元数」决定。"""
+    return PLAN_PROMPT.format(text=text)
+
+
 class QueueMixin:
     """任务队列：入队、逐条执行、确认/取消、卡片更新。"""
+
+    # 规划一轮要连续调几十上百次 TaskCreate：每次工具调用算一次迭代，
+    # 默认 max_iters=50 会把 60 个任务的计划从中间截断，这里临时放宽。
+    PLAN_MAX_ITERS = 120
 
     async def queue(self, text: str) -> dict[str, Any]:
         """拆成有序任务并串行执行；任务之间可以前后依赖。立即返回，进度用事件推送。"""
         await self._wait_ready(timeout=30)
         if self.agent is None:
             raise SessionError("not_ready", "session is not ready")
-        if self._busy or self._queue_active or self._goal_confirming:
+        if self._turn_open():
             raise SessionError("busy", "a reply is already running")
         if not text.strip():
             raise SessionError("internal", "empty queue")
@@ -63,22 +109,23 @@ class QueueMixin:
         self, text: str, before: set[str]
     ) -> tuple[list[Any], int, float] | None:
         """让模型把请求拆成有序任务，并等用户确认；不需要执行时返回 None。"""
-        plan = (
-            "Plan a queue of small tasks for the request below.\n\n"
-            "Rules:\n"
-            "- Always call TaskCreate once per task, in the order they "
-            "should run. Never refuse to plan just because one step builds "
-            "on an earlier one: the queue runs tasks strictly one after "
-            "another, so a later task already has the earlier output.\n"
-            "- Split the work so each task can be finished in one reply.\n"
-            "- Do not start any task now.\n\n"
-            f"Request:\n{text}"
-        )
+        react = getattr(self.agent, "react_config", None)
+        previous_iters = getattr(react, "max_iters", None)
+        if isinstance(previous_iters, int) and previous_iters < self.PLAN_MAX_ITERS:
+            try:
+                react.max_iters = self.PLAN_MAX_ITERS
+            except Exception:  # 框架对象不允许改时按原预算跑
+                previous_iters = None
+        else:
+            previous_iters = None
         try:
-            await self._start_turn(plan, f"/queue {text}")
+            await self._start_turn(plan_prompt(text), f"/queue {text}")
         except asyncio.CancelledError:
             self._queue_stop = True
             return None
+        finally:
+            if previous_iters is not None:
+                react.max_iters = previous_iters
         if self._queue_stop:
             return None
         new_tasks = [

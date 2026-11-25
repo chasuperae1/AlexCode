@@ -41,7 +41,7 @@ class InputQueueMixin:
         self._goal_editing = True
         prompt = self.query_one("#prompt", PromptInput)
         prompt.disabled = False
-        prompt.placeholder = "Edit the goal and press Enter to confirm again…"
+        prompt.placeholder = "修改目标后按 Enter 重新确认…"
         prompt.value = str(state._payload.get("goal") or "")
         prompt.focus()
         self._refresh_meta_line()
@@ -62,7 +62,7 @@ class InputQueueMixin:
         prompt = self.query_one("#prompt", PromptInput)
         prompt.value = ""
         prompt.disabled = True
-        prompt.placeholder = "Waiting for goal confirmation…"
+        prompt.placeholder = "等待目标确认…"
         prompt.focus()
         self._refresh_meta_line()
 
@@ -90,7 +90,7 @@ class InputQueueMixin:
             # 收起后把焦点还给输入框，用户可以直接接着打字
             try:
                 self.query_one("#prompt", PromptInput).focus()
-            except Exception:  # 输入框未挂载时忽略
+            except Exception:
                 pass
             return
         if self._ask_widget is not None:
@@ -106,7 +106,7 @@ class InputQueueMixin:
                 prompt = self.query_one("#prompt", PromptInput)
                 prompt.value = ""
                 prompt.disabled = True
-                prompt.placeholder = "Waiting for goal confirmation…"
+                prompt.placeholder = "等待目标确认…"
                 self._refresh_meta_line()
             elif self.link is not None:
                 self.run_worker(self._goal_rpc("goal_cancel"), exclusive=False)

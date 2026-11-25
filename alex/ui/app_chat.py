@@ -116,6 +116,8 @@ class ChatMixin(ChatStreamMixin, ChatDiffMixin):
             classes=classes,
             app=self if width > 0 else None,
             width=width if width > 0 else 0,
+            # 构造阶段还没挂到 app 上，显式带上上下文才能走渲染缓存
+            context=getattr(self, "render_context", None),
         )
 
     def _assistant_content_widgets(self, content: str) -> list:
@@ -137,6 +139,8 @@ class ChatMixin(ChatStreamMixin, ChatDiffMixin):
         md = self._stream_md
         if md is None:
             return
+        # 冻结前缀只是流式阶段的临时镜像，最终正文一次性换成 Markdown。
+        self._drop_stream_frozen()
         parts = split_file_links(content)
         if not any(isinstance(part, Attachment) for part in parts):
             md.update(content)

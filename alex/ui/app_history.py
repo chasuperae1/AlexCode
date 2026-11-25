@@ -9,6 +9,7 @@ from typing import Any
 from textual.widgets import Collapsible, Static
 
 from alex.core.snapshots import Checkpoint
+from alex.daemon.client import LinkError
 from alex.ui.constants import ASSISTANT, DEBUG_KINDS, USER
 from alex.ui.activity import SHELL_TOOLS
 from alex.ui.chat_window import (
@@ -102,6 +103,8 @@ class HistoryMixin:
     # 只影响控件，不删 history。
     _window_start: int | None = None
     _window_end: int | None = None
+    # 正在向会话补更早的一页：避免连续按 Ctrl+↑ 发出多条重复请求
+    _earlier_fetching = False
 
     def _render_history(self) -> None:
         """重建整个聊天区：用户消息 → 折叠的调试组 → 回答。"""
@@ -151,6 +154,10 @@ class HistoryMixin:
         self._md_build_width = int(
             body.content_region.width or body.size.width or 0
         )
+        # 同一份宽度写进渲染上下文（旧控件马上要被替换，不必广播重排）
+        context = getattr(self, "render_context", None)
+        if context is not None and self._md_build_width > 0:
+            context.set_width(self._md_build_width, broadcast=False)
 
         checkpoint_by_user, remaining = _align_checkpoints(
             self.view.history, self.view.checkpoints
@@ -258,10 +265,12 @@ class HistoryMixin:
         total: int,
     ) -> None:
         """窗口两端各放一行“加载更早/更晚”，比只靠滚动触发可靠。"""
-        if start > 0:
+        # 本地窗口起点之前 + 会话里还没加载的那部分，才是真正的“更早”
+        above = start + self.view.history_offset
+        if above > 0:
             build.widgets.insert(
                 0,
-                WindowEdge(f"↑ Load earlier · {start} in history", "earlier"),
+                WindowEdge(f"↑ Load earlier · {above} in history", "earlier"),
             )
             # 顶部插了一行，摘要卡的位置判断也要跟着偏移。
             build.turn_widget_start += 1
@@ -289,6 +298,8 @@ class HistoryMixin:
             else tail_start(history)
         )
         if current <= 0:
+            # 本地已翻到已加载的起点：向会话补一页更早的历史
+            self._fetch_earlier_page()
             return
         new_start = earlier_start(history, current, PAGE_UNITS)
         if new_start >= current:
@@ -339,6 +350,42 @@ class HistoryMixin:
             )
 
         chat.call_after_refresh(settle)
+
+    def _fetch_earlier_page(self) -> None:
+        """本地窗口已到已加载起点：向会话补一页更早的历史。"""
+        if not self.view.has_earlier or self._earlier_fetching:
+            return
+        self.run_worker(self._load_earlier_page(), group="history", exclusive=True)
+
+    async def _load_earlier_page(self) -> None:
+        """拉一页更早的历史接在本地前面，然后把窗口落到这一页的尾部。
+
+        history 只在尾部追加时下标才稳定；前插会让所有本地下标后移，
+        因此这里不做增量挂载，直接按新下标整体重建一次。
+        """
+        self._earlier_fetching = True
+        try:
+            page = await self._rpc("history_page", before=self.view.history_offset)
+            added = self.view.prepend_history(
+                page.get("items") or [], int(page.get("start", 0) or 0)
+            )
+            if not added:
+                return
+            history = self.view.history
+            self._window_start = earlier_start(history, added, PAGE_UNITS)
+            self._window_end = added
+            self._render_history()
+            chat = self.query_one("#chat", ChatLog)
+            self.call_after_refresh(lambda: chat.scroll_home(animate=False))
+        except LinkError as exc:
+            self.notify(
+                f"Cannot load earlier history: {exc}",
+                title="History",
+                severity="warning",
+                timeout=6,
+            )
+        finally:
+            self._earlier_fetching = False
 
     def _trim_prepended(self, chat: ChatLog, body, start: int) -> None:
         """裁掉视口以下、已经读过的旧尾部内容，换成新的“Load newer”入口。
@@ -445,6 +492,9 @@ class HistoryMixin:
         self._goal_card_widget = None
         self._stream_md = None
         self._stream_offset = 0
+        self._stream_frozen = []
+        self._stream_frozen_upto = 0
+        self._stream_hidden_marker = None
         self._turn_text_streamed = False
         self._turn_diff_cards = 0
         self._concise_card = None
@@ -531,6 +581,8 @@ class HistoryMixin:
                 str(data.get("stdout") or ""),
                 exit_code=int(data.get("exit_code", 0) or 0),
                 failed=state == "failed",
+                path=str(data.get("output_path") or ""),
+                line_count=int(data.get("line_count", 0) or 0),
             )
             return
         payload = dict(data)
@@ -545,6 +597,8 @@ class HistoryMixin:
             str(data.get("stdout") or ""),
             exit_code=int(data.get("exit_code", 0) or 0),
             failed=state == "failed",
+            path=str(data.get("output_path") or ""),
+            line_count=int(data.get("line_count", 0) or 0),
         )
         build.widgets.append(card)
         if request_id:

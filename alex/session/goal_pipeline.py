@@ -381,18 +381,32 @@ class GoalPipelineMixin:
         current = self._goal_retry_task
         if current is not None and not current.done():
             return
-        self._goal_retry_task = asyncio.create_task(self._goal_retry_later())
+        # 把这一轮的 _reply 任务对象交接过去：_reply_task 在收尾中途就被清空，
+        # 只盯着它会把“还在写历史/落盘”当成“已经结束”，和下一轮并发覆盖状态。
+        self._goal_retry_task = asyncio.create_task(
+            self._goal_retry_later(self._reply_task)
+        )
 
-    async def _goal_retry_later(self) -> None:
+    async def _goal_retry_later(self, previous: asyncio.Task | None) -> None:
         """等当前 _reply 收尾（写历史、落盘、释放 busy）后再起下一轮。"""
-        for _ in range(100):
-            await asyncio.sleep(0.2)
-            if self._reply_task is None:
-                break
+        if previous is not None and previous is not asyncio.current_task():
+            if not previous.done():
+                # 用 wait 而不是 await：不重抛上一轮的异常，也不会因为自己被
+                # 取消而顺手取消正在收尾的那一轮。
+                await asyncio.wait({previous})
         state = self._goal_state
-        if state is None or self._stopping:
+        if state is None:
+            return
+        if self._stopping or self._stop_pending:
+            # 用户在上一轮收尾窗口里按过 Esc：那一轮已经停了，不能再自动续跑
+            self._finish_goal("stopped")
             return
         if int(state["round"]) > int(state["max_iters"]):
+            return
+        current = self._reply_task
+        if current is not None and not current.done():
+            # 位置已被别的轮次占住：再起一条流水线只会互相覆盖，直接收尾
+            self._finish_goal("stopped")
             return
         self._launch_goal_pipeline(state)
 

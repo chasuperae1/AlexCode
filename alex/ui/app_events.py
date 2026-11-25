@@ -33,8 +33,10 @@ class EventsMixin(EventRouterMixin, HistoryMixin):
 
     def _apply_snapshot(self, data: dict) -> None:
         # 快照整体替换 history：窗口下标失效，回到最新。
-        self._window_start = None
-        self._window_end = None
+        # 续连快照例外：历史由 resync 补发，本地窗口（含翻页位置）保持不动。
+        if not data.get("resume"):
+            self._window_start = None
+            self._window_end = None
         for item in data.get("boot", []) or []:
             stage = str(item.get("stage", ""))
             entry = self._boot.get(stage)
@@ -390,6 +392,9 @@ class EventsMixin(EventRouterMixin, HistoryMixin):
                     self._render_stream_segment(display)
         self._stream_md = None
         self._stream_offset = 0
+        self._stream_frozen = []
+        self._stream_frozen_upto = 0
+        self._stream_hidden_marker = None
         if self._thinking_box is not None:
             self._finish_thinking(self.view.thinking.strip())
         self.view.thinking = ""

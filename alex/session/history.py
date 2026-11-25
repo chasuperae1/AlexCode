@@ -120,7 +120,7 @@ class HistoryMixin:
             raise SessionError("not_ready", "session is not ready")
         if not agent.state.context:
             raise SessionError("not_ready", "Nothing to compact yet")
-        if self._busy or self._queue_active:
+        if self._turn_open():
             raise SessionError("busy", "a reply is still running")
         self._set_busy(True)
         self._set_activity("Compacting context…")
@@ -173,7 +173,7 @@ class HistoryMixin:
             self._set_busy(False)
 
     async def clear_session(self) -> None:
-        if self._busy:
+        if self._turn_open():
             raise SessionError("busy", "a reply is still running")
         from alex.core.agent import build_agent, build_model
         from alex.core.tools import TrackedLocalBackend
@@ -208,7 +208,7 @@ class HistoryMixin:
         }
         self.emit(
             "history_reset",
-            {"history": self._history_payload(), "checkpoints": []},
+            {**self._history_view(), "checkpoints": []},
         )
         self.emit("checkpoints", {"checkpoints": []})
         self._refresh_tasks()
@@ -218,7 +218,7 @@ class HistoryMixin:
     async def undo(self, index: int | None = None) -> dict[str, Any]:
         if self.agent is None or self._snapshots is None:
             raise SessionError("not_ready", "snapshots are not available")
-        if self._busy:
+        if self._turn_open():
             raise SessionError("busy", "a reply is still running")
         if not self._checkpoints:
             raise SessionError("not_ready", "No checkpoints yet")
@@ -283,7 +283,7 @@ class HistoryMixin:
         self.emit(
             "history_reset",
             {
-                "history": self._history_payload(),
+                **self._history_view(),
                 "checkpoints": [asdict(item) for item in self._checkpoints],
             },
         )
@@ -294,7 +294,7 @@ class HistoryMixin:
     async def redo(self) -> dict[str, Any]:
         if self.agent is None or self._snapshots is None or self._revert is None:
             raise SessionError("not_ready", "Nothing to redo")
-        if self._busy:
+        if self._turn_open():
             raise SessionError("busy", "a reply is still running")
         revert = self._revert
         try:
@@ -313,7 +313,7 @@ class HistoryMixin:
         self.emit(
             "history_reset",
             {
-                "history": self._history_payload(),
+                **self._history_view(),
                 "checkpoints": [asdict(item) for item in self._checkpoints],
             },
         )

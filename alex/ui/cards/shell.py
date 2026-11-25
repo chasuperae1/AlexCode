@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import re
+from pathlib import Path
 
 from rich.cells import cell_len
 from rich.text import Text
@@ -150,6 +151,10 @@ class ShellPermissionCard(PermissionChoiceMixin, Vertical):
         self._output = ""
         self._exit_code = int(payload.get("exit_code", 0) or 0)
         self._out_rows = 0
+        # 超过首尾预览阈值的输出全文落在 data/shell/<request>.txt，展开时再读
+        self._output_path = str(payload.get("output_path") or "")
+        self._output_full = False
+        self._total_rows = int(payload.get("line_count") or 0)
 
         self._title = Static(self._title_text(), classes="spc-title")
         self._hint = Static(self._hint_text(), classes="spc-hint")
@@ -523,14 +528,41 @@ class ShellPermissionCard(PermissionChoiceMixin, Vertical):
         *,
         exit_code: int | None = None,
         failed: bool = False,
+        path: str = "",
+        line_count: int = 0,
     ) -> None:
-        """开发者模式下展示完整 shell 输出；简洁模式不会保留这张卡。"""
+        """开发者模式下展示 shell 输出；超出阈值时 text 只是首尾预览。"""
         self._output = str(text or "")
+        self._output_path = str(path or "")
+        self._output_full = False
+        if line_count:
+            self._total_rows = int(line_count)
         if exit_code is not None:
             self._exit_code = int(exit_code)
         self._out_rows = len(self._output.splitlines())
         if self._ready:
             self._write_output(failed=failed)
+
+    def _ensure_full_output(self) -> bool:
+        """展开时按需把外置的全文读回来；读不到就保留首尾预览。"""
+        if self._output_full or not self._output_path:
+            return False
+        self._output_full = True
+        try:
+            from alex.config import ROOT
+
+            path = Path(self._output_path)
+            if not path.is_absolute():
+                path = ROOT / path
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return False
+        if not text.strip():
+            return False
+        self._output = text
+        self._out_rows = len(text.splitlines())
+        self._total_rows = max(self._total_rows, self._out_rows)
+        return True
 
     def _write_output(self, *, failed: bool = False) -> None:
         text = self._output.replace("\r\n", "\n").replace("\r", "\n")
@@ -544,11 +576,14 @@ class ShellPermissionCard(PermissionChoiceMixin, Vertical):
             return
         label = Text()
         label.append("Output", style=f"bold {self._theme.secondary}")
+        total = max(self._total_rows, self._out_rows)
         label.append(
-            f" · {self._out_rows} line{'s' if self._out_rows != 1 else ''}"
-            f" · exit {self._exit_code}",
+            f" · {total} line{'s' if total != 1 else ''}",
             style=self._theme.secondary,
         )
+        if total > self._out_rows:
+            label.append(" · preview", style=self._theme.secondary)
+        label.append(f" · exit {self._exit_code}", style=self._theme.secondary)
         self._out_label.update(label)
         style = self._theme.error if failed else self._theme.foreground
         for line in lines:
@@ -561,6 +596,9 @@ class ShellPermissionCard(PermissionChoiceMixin, Vertical):
         self.set_class(folded, "-folded")
         self._hint.update(self._hint_text())
         if self._open:
+            # 展开才把全文读回来：首屏只排版首尾预览，长输出不再拖慢挂载。
+            if self._ensure_full_output() and self._ready:
+                self._write_output(failed=self._state == "failed")
             self.call_after_refresh(self._sync_height)
 
     def finish(self, data: dict) -> None:
@@ -577,6 +615,8 @@ class ShellPermissionCard(PermissionChoiceMixin, Vertical):
             stdout,
             exit_code=self._exit_code,
             failed=not ok,
+            path=str(data.get("output_path") or ""),
+            line_count=int(data.get("line_count", 0) or 0),
         )
         if stdout.strip():
             # 有输出时保留完整卡片；若用户此前手动折叠则尊重其选择

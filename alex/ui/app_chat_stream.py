@@ -19,6 +19,10 @@ from alex.ui.widgets import _format_tokens
 # 流式正文超过这个长度就只保留尾部，避免超长 Markdown 反复重排
 _STREAM_TRUNCATE = 5000
 _STREAM_TAIL = 3000
+# 每攒够这么多字符就把稳定前缀冻结成独立块，只有尾巴跟着 delta 变化
+_STREAM_FREEZE_CHARS = 500
+# 冻结块最多保留几块（6 × ≥500 字符，和解冻前的尾巴上限对齐）
+_STREAM_FROZEN_BLOCKS = 6
 
 
 class ChatStreamMixin:
@@ -335,6 +339,8 @@ class ChatStreamMixin:
                 segment = (
                     "… (earlier content hidden)\n" + segment[-_STREAM_TAIL:]
                 )
+            # 冻结前缀只是流式阶段的临时块，最终正文由下面这份 Markdown 承载。
+            self._drop_stream_frozen()
             # 工具/思考之前的中间正文也要进 history，否则主题切换或设置变更
             # 触发重建时，这段只存在于当前界面的文字会消失。验收者说的正文
             # 记成 verifier_text，重建时才不会挂到 Alex 名下。
@@ -358,6 +364,10 @@ class ChatStreamMixin:
             return
         chat = self._chat()
         theme = self.current_theme
+        # 新一轮从当前偏移开始冻，上一轮遗留的冻结块不该再被算进来。
+        self._stream_frozen = []
+        self._stream_frozen_upto = self._stream_offset
+        self._stream_hidden_marker = None
         if not self._verifier_mode:
             role = Static(
                 Text("Alex", style=f"bold {theme.primary}"), classes="role"
@@ -374,20 +384,106 @@ class ChatStreamMixin:
     def _flush_stream(self) -> None:
         """节流刷新：流式阶段用纯文本渲染，结束时再一次性转成 Markdown。
 
-        长回复（>5000 字符）只显示尾部，避免对巨量字符串做布局计算。
+        已经稳定的前缀每攒够 ``_STREAM_FREEZE_CHARS`` 就切成独立的冻结块，
+        只有最后那块尾巴跟着 delta 重排：整段文字每 0.15s 重新量一次布局的
+        代价随长度线性增长，长回复就是这样卡住的。
         """
         if not self._stream_dirty:
             return
         self._stream_dirty = False
         if self._stream_md is not None:
             display = self.view.stream_text[self._stream_offset:]
-            if len(display) > _STREAM_TRUNCATE:
-                display = "… (earlier content hidden)\n" + display[-_STREAM_TAIL:]
-            self._stream_md.update(Text(display + " ▍"))
+            start = self._freeze_stream_prefix(display)
+            tail = display[start:]
+            if len(tail) > _STREAM_TRUNCATE:
+                tail = "… (earlier content hidden)\n" + tail[-_STREAM_TAIL:]
+            self._stream_md.update(Text(tail + " ▍"))
         if self.view.thinking:
             self._thinking_ticks += 1
             if self._thinking_ticks % 3 == 0:
                 self._update_thinking()
+
+    def _freeze_stream_prefix(self, display: str) -> int:
+        """把稳定的前缀挂成冻结块，返回尾巴在 ``display`` 里的起点。
+
+        切点只认换行（优先空行），避免把一个句子劈成两块；找不到切点就
+        先不冻，等下一段 delta 攒够了再说。
+        """
+        state = getattr(self, "_stream_frozen", None)
+        if state is None:
+            state = self._stream_frozen = []
+        start = max(0, int(getattr(self, "_stream_frozen_upto", 0)) - self._stream_offset)
+        if len(display) - start < _STREAM_FREEZE_CHARS:
+            return start
+        cut = display.find("\n\n", start + _STREAM_FREEZE_CHARS)
+        if cut < 0:
+            cut = display.find("\n", start + _STREAM_FREEZE_CHARS)
+        if cut <= start:
+            return start
+        chunk = display[start:cut]
+        tail = self._stream_md
+        try:
+            body = self._chat().query_one("#chat-body")
+            frozen = Static(Text(chunk), classes="md stream-frozen")
+            if tail is not None and tail.parent is body:
+                body.mount(frozen, before=tail)
+            else:
+                body.mount(frozen)
+        except Exception:  # 聊天区还没就绪：这一帧先不冻
+            return start
+        state.append(frozen)
+        self._stream_frozen_upto = self._stream_offset + cut
+        # 冻结块也封顶：整段流式正文超过 _STREAM_TRUNCATE 就从最老的丢起。
+        # 被挤掉的那几块在流式阶段就看不到了，必须留一句提示，否则屏幕上
+        # 的正文会从中间开始（最终 Markdown 会补全，但过程中要能看出来）。
+        dropped = False
+        while len(state) > _STREAM_FROZEN_BLOCKS:
+            oldest = state.pop(0)
+            try:
+                oldest.remove()
+            except Exception:
+                pass
+            dropped = True
+        if dropped:
+            self._stream_hidden_notice()
+        return cut
+
+    def _stream_hidden_notice(self) -> None:
+        """在最早还剩的冻结块上方挂一句“前面被隐藏”，同一次流式只挂一条。"""
+        if getattr(self, "_stream_hidden_marker", None) is not None:
+            return
+        try:
+            body = self._chat().query_one("#chat-body")
+            marker = Static(
+                Text("… (earlier content hidden)"),
+                classes="md stream-hidden",
+            )
+            first = self._stream_frozen[0] if self._stream_frozen else self._stream_md
+            if first is not None and first.parent is body:
+                body.mount(marker, before=first)
+            else:
+                body.mount(marker)
+        except Exception:  # 聊天区还没就绪：等下一次冻结再补
+            return
+        self._stream_hidden_marker = marker
+
+    def _drop_stream_frozen(self) -> None:
+        """收尾/重建：撤掉冻结前缀和隐藏提示，正文交给最终那份 Markdown。"""
+        for widget in getattr(self, "_stream_frozen", []) or []:
+            try:
+                widget.remove()
+            except Exception:
+                pass
+        marker = getattr(self, "_stream_hidden_marker", None)
+        if marker is not None:
+            try:
+                marker.remove()
+            except Exception:
+                pass
+        self._stream_hidden_marker = None
+        self._stream_frozen = []
+        self._stream_frozen_upto = self._stream_offset
+
 
     @staticmethod
 
@@ -429,7 +525,13 @@ class ChatStreamMixin:
             except Exception:
                 width = 0
         # 标题与摘要作为一个整体一次性挂载，避免分块出现像在流式追加。
-        return CompactionBlock(label, summary, theme, width=width)
+        return CompactionBlock(
+            label,
+            summary,
+            theme,
+            width=width,
+            context=getattr(self, "render_context", None),
+        )
 
     def _append_compaction(self, summary: str, detail: str = "") -> None:
         """在聊天区标记本轮发生过上下文压缩，并展示摘要。"""

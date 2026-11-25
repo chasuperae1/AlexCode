@@ -29,6 +29,16 @@ from alex.session.common import (
 
 
 from alex.session.boot import BootMixin
+
+# 一条 JSON Lines 消息的预算。完整 history 一旦随快照发出，单行就会顶到
+# 协议上限（8MB），超限的 ValueError 会直接打断客户端的读循环；因此历史只
+# 按页发送，快照里只保留尾部一页和往前翻页用的 before 游标。
+HISTORY_PAGE_RECORDS = 120
+HISTORY_PAGE_BYTES = 1_500_000
+# 单条正文的截断长度：一条 30k 的回复不该独占一整页。
+HISTORY_ITEM_CHARS = 20000
+
+
 class CoreMixin(BootMixin):
     """会话生命周期：初始化、快照/历史负载、关闭、状态与提示。"""
 
@@ -59,6 +69,12 @@ class CoreMixin(BootMixin):
         self._phase = "initializing"
         self._meta_base = ""
         self._reply_task: asyncio.Task | None = None
+        # 本轮已进入收尾（写历史 / 落盘 / 记检查点），还没放行下一轮。
+        # 这一个窗口里 _reply_task 和 _busy 都还占着位置：submit、Esc 与
+        # goal 重试都要看得见“还有一轮没收完”，否则会并发写坏会话状态。
+        self._finishing = False
+        # 用户已经请求停止本轮：跨过收尾边界仍然有效，直到下一轮真正开始
+        self._stop_pending = False
         # /queue：串行任务队列的运行时状态
         self._queue_task: asyncio.Task | None = None
         self._queue_active = False
@@ -282,7 +298,7 @@ class CoreMixin(BootMixin):
     def snapshot(self) -> dict[str, Any]:
         return {
             "phase": self._phase,
-            "history": self._history_payload(),
+            **self._history_view(),
             "stream_text": self.stream_text,
             "thinking": self.thinking,
             "busy": self._busy,
@@ -311,18 +327,60 @@ class CoreMixin(BootMixin):
             ],
         }
 
-    def _history_payload(self) -> list[list[str]]:
-        """把显示历史打包成快照字段。
+    @staticmethod
+    def _history_item(kind: str, text: str) -> list[str]:
+        """单条记录在协议里的样子：超长正文截断，避免一页里塞进巨型回复。"""
+        if len(text) > HISTORY_ITEM_CHARS:
+            text = text[:HISTORY_ITEM_CHARS] + "…"
+        return [kind, text]
 
-        单条文本仍然截断，避免快照超过单行传输上限。
+    def _history_page(
+        self,
+        before: int | None = None,
+        limit: int = HISTORY_PAGE_RECORDS,
+    ) -> dict[str, Any]:
+        """取 ``before`` 之前的一页历史（不含 ``before``），从新往旧装到预算为止。
+
+        ``start`` 就是再往前翻时的 before 游标，``total`` 是会话历史总条数，
+        客户端用它换算窗口下标——两者合起来让客户端不必拿到整份历史。
         """
-        items = self.history
-        payload: list[list[str]] = []
-        for kind, text in items:
-            if len(text) > 20000:
-                text = text[:20000] + "…"
-            payload.append([kind, text])
-        return payload
+        total = len(self.history)
+        end = total if before is None else max(0, min(int(before), total))
+        limit = max(1, min(int(limit), HISTORY_PAGE_RECORDS))
+        start = end
+        budget = HISTORY_PAGE_BYTES
+        while start > 0 and end - start < limit:
+            kind, text = self.history[start - 1]
+            size = len(text.encode("utf-8")) + len(kind) + 8
+            # 至少返回一条：单条自己就超预算时也要让客户端拿到内容
+            if budget - size < 0 and start < end:
+                break
+            budget -= size
+            start -= 1
+        return {
+            "items": [
+                self._history_item(*self.history[index])
+                for index in range(start, end)
+            ],
+            "start": start,
+            "end": end,
+            "total": total,
+        }
+
+    def _history_view(self) -> dict[str, Any]:
+        """快照与 history_reset 共用的历史字段：尾部一页 + 往回翻的游标。"""
+        page = self._history_page()
+        return {
+            "history": page["items"],
+            "history_start": page["start"],
+            "history_total": page["total"],
+        }
+
+    def history_page(
+        self, before: int | None = None, limit: int = HISTORY_PAGE_RECORDS
+    ) -> dict[str, Any]:
+        """RPC：翻到 ``before`` 之前的一页历史；TUI 向上翻过已加载窗口时调用。"""
+        return self._history_page(before, limit)
 
     def _tasks_payload(self) -> dict[str, Any]:
         if self.agent is None:
@@ -371,12 +429,25 @@ class CoreMixin(BootMixin):
         for kind, text in pending.items():
             self.emit(kind, {"delta": text})
 
+    def _turn_open(self) -> bool:
+        """会话是否已被某一轮占住：回复中、收尾中，或队列 / 目标还在等确认。
+
+        单看 ``_busy`` 不够：``submit`` 在检查通过之后才创建 ``_reply_task``，
+        这中间若再进来一条请求，attr 还在但 ``_busy`` 仍是 False。
+        """
+        if self._finishing or self._busy or self._queue_active:
+            return True
+        if self._goal_confirming:
+            return True
+        task = self._reply_task
+        return task is not None and not task.done()
+
     async def submit(self, text: str, images: list[str] | None = None) -> int:
         """发起一轮回复，返回 exchange_id。"""
         await self._wait_ready(timeout=30)
         if self.agent is None:
             raise SessionError("not_ready", "session is not ready")
-        if self._busy or self._queue_active or self._goal_confirming:
+        if self._turn_open():
             raise SessionError("busy", "a reply is already running")
         if self._revert is not None:
             self.commit_revert()
@@ -419,7 +490,7 @@ class CoreMixin(BootMixin):
 
     async def rebuild_agent(self) -> dict[str, Any]:
         """按最新配置重建 agent（技能/规则开关），不重启 MCP。"""
-        if self._busy:
+        if self._turn_open():
             raise SessionError("busy", "a reply is still running")
         reload_config()
         await self._rebuild_agent()

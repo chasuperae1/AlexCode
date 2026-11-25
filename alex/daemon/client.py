@@ -17,11 +17,16 @@ from pathlib import Path
 from typing import Any, Callable
 
 from alex.daemon.protocol import (
+    CLIENT_PING_SECONDS,
+    EVENT_BUFFER_SIZE,
     MAX_LINE_BYTES,
     MSG_BYE,
     MSG_EVENT,
     MSG_HELLO,
     MSG_HELLO_OK,
+    MSG_PING,
+    MSG_PONG,
+    MSG_RESYNC,
     MSG_RPC,
     MSG_SNAPSHOT,
     PROTOCOL_VERSION,
@@ -80,22 +85,60 @@ class LocalLink:
         await self.session.close()
 
 
+def _resume_point(
+    resume: dict[str, Any] | None,
+    session_id: str,
+    snapshot: dict[str, Any],
+) -> int | None:
+    """这次重连能否只补事件：必须同一个 daemon，且缺口没超过环形缓冲。"""
+    if not resume or not session_id:
+        return None
+    if str(resume.get("session_id", "")) != session_id:
+        return None
+    seq = int(resume.get("seq", -1))
+    gap = int(snapshot.get("last_seq", -1)) - seq
+    if seq < 0 or gap < 0 or gap > EVENT_BUFFER_SIZE:
+        return None
+    return seq
+
+
 class DaemonClient:
-    """后台 daemon 的 JSON Lines 客户端。"""
+    """后台 daemon 的 JSON Lines 客户端。
+
+    ``connect`` 握手只收一页快照；断链重连可带 ``resume`` 口令，让服务端
+    从事件缓冲用 ``resync`` 补齐断开期间的记录，而不是重下一整段历史。
+    """
 
     def __init__(self, reader, writer) -> None:
         self._reader = reader
         self._writer = writer
         self._handler: EventHandler | None = None
         self._close_handler: Callable[[], None] | None = None
+        self._lost_handler: Callable[[], None] | None = None
         self._pending: dict[int, asyncio.Future] = {}
+        # 回调挂上之前收到的事件先排队：续连时补发的事件不能丢
+        self._queued: list[tuple[str, dict[str, Any]]] = []
         self._last_seq = -1
         self._next_id = 0
         self._reader_task: asyncio.Task | None = None
+        self._heartbeat_task: asyncio.Task | None = None
         self._closed = False
+        self._closing = False
+        self._lost_reason = ""
+        self._awaiting_pong = False
+        self._session_id = ""
+        self._initial_snapshot: dict[str, Any] = {}
+        self._resume_seq: int | None = None
+        self._started = False
 
     @classmethod
-    async def connect(cls, info: SessionInfo, timeout: float = 8.0) -> "DaemonClient":
+    async def connect(
+        cls,
+        info: SessionInfo,
+        timeout: float = 8.0,
+        *,
+        resume: dict[str, Any] | None = None,
+    ) -> "DaemonClient":
         try:
             reader, writer = await asyncio.wait_for(
                 asyncio.open_connection(
@@ -126,27 +169,65 @@ class DaemonClient:
             writer.close()
             raise LinkError("daemon rejected the connection")
         client = cls(reader, writer)
+        client._session_id = str(reply.get("session_id", ""))
         snapshot = await asyncio.wait_for(read_line(reader), timeout)
         if snapshot is None or snapshot.get("type") != MSG_SNAPSHOT:
             writer.close()
             raise LinkError("daemon did not send a snapshot")
-        client._last_seq = int(snapshot.get("last_seq", -1))
         client._initial_snapshot = snapshot
+        client._resume_seq = _resume_point(resume, client._session_id, snapshot)
+        client._last_seq = (
+            client._resume_seq
+            if client._resume_seq is not None
+            else int(snapshot.get("last_seq", -1))
+        )
+        if client._resume_seq is not None:
+            # 补差请求必须赶在任何实时事件之前发出：服务端在同一轮里把缓冲
+            # 连着写完，客户端读到的顺序就是 snapshot → 补差 → 实时，
+            # 否则后面的实时事件会先把 _last_seq 顶上去，把补差整段滤掉。
+            writer.write(
+                encode({"type": MSG_RESYNC, "after_seq": client._resume_seq})
+            )
+            await writer.drain()
         client._reader_task = asyncio.create_task(client._read_loop())
+        client._heartbeat_task = asyncio.create_task(client._heartbeat())
         return client
 
     @property
     def initial_snapshot(self) -> dict[str, Any]:
         return self._initial_snapshot
 
+    @property
+    def is_open(self) -> bool:
+        return not self._closed
+
+    def resume_token(self) -> dict[str, Any]:
+        """重连口令：这个 seq 之后的记录都还在服务端的事件缓冲里。"""
+        return {"seq": self._last_seq, "session_id": self._session_id}
+
     def on_event(self, handler: EventHandler) -> None:
         self._handler = handler
+        if self._started:
+            self._flush_queued()
+
+    def _flush_queued(self) -> None:
+        queued, self._queued = self._queued, []
+        for kind, data in queued:
+            self._dispatch(kind, data)
 
     def on_close(self, handler: Callable[[], None]) -> None:
         self._close_handler = handler
 
+    def on_lost(self, handler: Callable[[], None]) -> None:
+        """传输层被动断开（超限行、心跳超时）时回调，供上层重连补差。"""
+        self._lost_handler = handler
+
     def _dispatch(self, kind: str, data: dict[str, Any]) -> None:
-        if self._handler is None:
+        # 握手快照落地（startup）之前一律排队：首连时快照会把历史整段换掉，
+        # 先灌进来的记录会被它吞掉；续连时补差要先于实时事件落位。
+        if self._handler is None or not self._started:
+            if len(self._queued) < EVENT_BUFFER_SIZE:
+                self._queued.append((kind, data))
             return
         try:
             self._handler(kind, data)
@@ -161,8 +242,28 @@ class DaemonClient:
         """daemon 已初始化，握手时的 snapshot 即当前状态。"""
         payload = dict(self._initial_snapshot)
         payload.pop("type", None)
-        payload["last_seq"] = self._last_seq
+        if self._resume_seq is None:
+            payload["last_seq"] = self._last_seq
+        else:
+            # 续连：断开期间的历史由 resync 从服务端缓冲补发，这里不再重发历史，
+            # 否则客户端已经翻到的旧页会被一页尾部快照冲掉。流式正文同理：
+            # 补发的 text_delta / thinking_delta 会接着本地缓冲往后接，
+            # 快照里再给一份当前值就会把同一段文字写两遍。
+            for key in (
+                "history",
+                "history_start",
+                "history_total",
+                "stream_text",
+                "thinking",
+            ):
+                payload.pop(key, None)
+            payload["resume"] = True
+            payload["last_seq"] = self._last_seq
+        # 快照先落地，再放排队的事件：否则首连时快照会把刚到的新记录换掉，
+        # 续连时补差也会被排在实时事件之后。
+        self._started = True
         self._dispatch("snapshot", payload)
+        self._flush_queued()
 
     async def _read_loop(self) -> None:
         try:
@@ -173,17 +274,41 @@ class DaemonClient:
         except asyncio.CancelledError:  # 读循环被取消属正常关闭
             pass
         except (OSError, ValueError) as exc:
-            print(f"[alex] daemon link ended: {exc!r}", file=sys.stderr)
+            # 超限行（ValueError）同样不可恢复：分帧已经失效，只能按断链
+            # 处理，交给上层重连 + resync 补差，而不是让界面悄悄停更。
+            self._lost_reason = f"{type(exc).__name__}: {exc}"
+            if not self._closing:
+                print(f"[alex] daemon link lost: {self._lost_reason}", file=sys.stderr)
         except Exception as exc:
-            print(f"[alex] daemon link crashed: {exc!r}", file=sys.stderr)
+            self._lost_reason = f"link crashed: {exc}"
+            if not self._closing:
+                print(f"[alex] daemon link crashed: {exc!r}", file=sys.stderr)
         finally:
-            self._close_link()
+            self._close_link(lost=bool(self._lost_reason) and not self._closing)
+
+    async def _heartbeat(self) -> None:
+        """定期 ping：半开连接不会自己报错，只能靠 pong 超时发现。"""
+        while True:
+            await asyncio.sleep(CLIENT_PING_SECONDS)
+            if self._closed or self._closing:
+                return
+            if self._awaiting_pong:
+                self._lose_link("heartbeat timeout")
+                return
+            self._awaiting_pong = True
+            try:
+                await self._send({"type": MSG_PING})
+            except LinkError as exc:
+                self._lose_link(f"heartbeat send failed: {exc}")
+                return
 
     def _handle_message(self, message: dict) -> bool:
         """分发一条 daemon 消息；返回 False 表示读循环该结束了。"""
         kind = message.get("type")
         if kind == MSG_EVENT:
             self._apply_event(message)
+        elif kind == MSG_PONG:
+            self._awaiting_pong = False
         elif kind == "rpc_result":
             self._resolve_rpc(message)
         elif kind == MSG_BYE:
@@ -213,12 +338,37 @@ class DaemonClient:
             )
         )
 
-    def _close_link(self) -> None:
+    async def _send(self, message: dict[str, Any]) -> None:
+        if self._closed:
+            raise LinkError("connection closed")
+        try:
+            self._writer.write(encode(message))
+            await self._writer.drain()
+        except OSError as exc:
+            raise LinkError(f"send failed: {exc}") from exc
+
+    def _lose_link(self, reason: str) -> None:
+        """主动判定链路已死：关 socket 并走断链流程。"""
+        if self._closed or self._closing:
+            return
+        self._lost_reason = reason
+        try:
+            self._writer.close()
+        except Exception:  # socket 已断开，关闭失败可忽略
+            pass
+        self._close_link(lost=True)
+
+    def _close_link(self, *, lost: bool = False) -> None:
+        if self._closed:
+            return
         self._closed = True
         for future in self._pending.values():
             if not future.done():
                 future.set_exception(LinkError("connection closed"))
         self._pending.clear()
+        # 先通知断链，上层据此决定重连；重连成功就不必再提示“已断开”
+        if lost and self._lost_handler is not None:
+            self._lost_handler()
         if self._close_handler is not None:
             self._close_handler()
 
@@ -230,32 +380,32 @@ class DaemonClient:
         future = asyncio.get_running_loop().create_future()
         self._pending[request_id] = future
         try:
-            self._writer.write(
-                encode(
-                    {
-                        "type": MSG_RPC,
-                        "id": request_id,
-                        "method": method,
-                        "params": params,
-                    }
-                )
+            await self._send(
+                {
+                    "type": MSG_RPC,
+                    "id": request_id,
+                    "method": method,
+                    "params": params,
+                }
             )
-            await self._writer.drain()
-        except OSError as exc:
+        except LinkError:
             self._pending.pop(request_id, None)
-            raise LinkError(f"send failed: {exc}") from exc
+            raise
         return await future
 
     async def close(self) -> None:
-        self._closed = True
-        if self._reader_task is not None and not self._reader_task.done():
-            self._reader_task.cancel()
+        self._closing = True
+        for task in (self._reader_task, self._heartbeat_task):
+            if task is None or task.done():
+                continue
+            task.cancel()
             try:
-                await self._reader_task
-            except asyncio.CancelledError:  # 取消后台读任务，异常属正常收尾
+                await task
+            except asyncio.CancelledError:  # 取消后台任务，异常属正常收尾
                 pass
-            except Exception:  # 读任务退出异常不影响关闭
+            except Exception:  # 任务退出异常不影响关闭
                 pass
+        self._closed = True
         try:
             self._writer.close()
             await self._writer.wait_closed()
@@ -363,9 +513,16 @@ async def _retire_daemon(info: SessionInfo) -> None:
 
 
 async def ensure_daemon(
-    root: Path, timeout: float = 25.0
+    root: Path,
+    timeout: float = 25.0,
+    *,
+    resume: dict[str, Any] | None = None,
 ) -> DaemonClient:
-    """连接已有 daemon；源码已更新或没有则拉起新实例。"""
+    """连接已有 daemon；源码已更新或没有则拉起新实例。
+
+    ``resume`` 是上次连接的令牌：同一个 daemon 还在时用它补事件，
+    否则退回完整快照。
+    """
     session_path = root / "data" / "daemon.json"
     info = read_session_file(session_path)
     if info is not None and _is_stale(info):
@@ -373,7 +530,7 @@ async def ensure_daemon(
         info = None
     if info is not None:
         try:
-            return await DaemonClient.connect(info)
+            return await DaemonClient.connect(info, resume=resume)
         except LinkError as exc:  # 旧 daemon 已连不上：记一笔后拉起新的
             print(f"[alex] reconnect failed, spawning daemon: {exc!r}", file=sys.stderr)
 
@@ -391,7 +548,7 @@ async def ensure_daemon(
                 last_spawn = time.monotonic()
             continue
         try:
-            return await DaemonClient.connect(info)
+            return await DaemonClient.connect(info, resume=resume)
         except LinkError:
             continue
     raise LinkError("daemon did not start; see data/daemon.log")
