@@ -331,10 +331,14 @@ class ChatLog(VerticalScroll):
     def clear(self, keep=None) -> None:
         """清空聊天区；``keep`` 指定的控件原地保留（未决权限卡等）。"""
         body = self.query_one("#chat-body")
-        for child in list(body.children):
-            if keep is not None and child is keep:
-                continue
-            child.remove()
+        doomed = [
+            child
+            for child in body.children
+            if not (keep is not None and child is keep)
+        ]
+        if doomed:
+            # 一块一块 remove 会让容器重排 N 次；成批摘掉，重建时少卡几十毫秒。
+            body.remove_children(doomed)
 
     def on_click(self, event) -> None:
         if isinstance(event.widget, WindowEdge):
@@ -452,3 +456,11 @@ class ChatLog(VerticalScroll):
         if self._follow_timer is not None:
             self._follow_timer.stop()
             self._follow_timer = None
+
+    def stop_follow(self) -> None:
+        """外部要自己摆弄历史窗口时先停掉贴底跟随。
+
+        跟随定时器每 100ms 会把视口贴到底部；翻历史时一边前插补滚动、一边被
+        它拽回底部，读者就会感觉“划不动、一松手又被拉走”。
+        """
+        self._stop_follow()

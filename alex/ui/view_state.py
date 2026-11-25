@@ -143,13 +143,16 @@ class ChatViewState:
     def prepend_history(self, items: list, start: int) -> int:
         """把会话更早的一页接在本地历史前面，返回插入条数。
 
-        插入会让所有本地下标后移，调用方据此整体平移窗口。
+        插入会让所有本地下标后移，调用方据此整体平移窗口；快照里的
+        ``history_start`` 也是历史下标，一样要跟着挪，否则回溯会指向别的消息。
         """
         added = [tuple(item) for item in items]
         if not added:
             return 0
         self.history[0:0] = added
         self.history_offset = max(0, int(start))
+        for checkpoint in self.checkpoints:
+            checkpoint.history_start += len(added)
         self._reindex()
         return len(added)
 
