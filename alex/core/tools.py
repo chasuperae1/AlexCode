@@ -28,9 +28,9 @@ _WRITE_INTENT = re.compile(
 )
 
 
-# 框架自带的 TaskCreate 描述只要求“3 步以上才建清单”，模型据此往往把几十个
-# 可独立验收的单元压成 7-8 个大任务。这里在原描述后追加粒度要求，避免重复写
-# 一份完整描述（原描述里的“何时用/何时不用”仍然有效）。
+# /queue 规划专用：普通对话不带 TaskCreate，避免模型随手建一堆任务却
+# 不执行、不更新。框架自带的描述只要求“3 步以上才建清单”，规划时又容易
+# 把几十个可独立验收的单元压成 7-8 个大任务，这里追加粒度要求。
 _TASK_GRANULARITY = """
 
 ## Granularity
@@ -51,7 +51,7 @@ coarse - split it further. Each task must still be finishable in one reply.
 
 
 class PlanTaskCreate(TaskCreate):
-    """TaskCreate 加细粒度要求：单元数量决定任务数量，别把工作压成大块。"""
+    """仅供 /queue 规划一轮临时挂载的 TaskCreate：拆细、拆到可独立验收。"""
 
     description: str = TaskCreate.description + _TASK_GRANULARITY
 

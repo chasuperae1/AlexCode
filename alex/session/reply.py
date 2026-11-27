@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import re
 import time
@@ -57,6 +58,8 @@ class _ReplyRun:
     cache_tokens: int = 0
     compacted: bool = False
     mutated: bool = False
+    # 本轮开始前后台统计到的用量：压缩发生后用它当“压缩前”的值
+    tokens_before: int = 0
 
 
 class ReplyMixin:
@@ -189,10 +192,14 @@ class ReplyMixin:
                     self._flush_deltas()
                 handler = handlers.get(type(event))
                 if handler is not None:
-                    handler(event, run)
+                    # 大多数处理器是同步的；ReplyStart 需要在压缩前量一次
+                    # 真实用量，故允许处理器返回可等待对象。
+                    result = handler(event, run)
+                    if inspect.isawaitable(result):
+                        await result
                 elif hasattr(event, "get_text_content"):
                     run.final_text = event.get_text_content()
-                self._check_compaction(run)
+                await self._check_compaction(run)
         except asyncio.CancelledError:
             run.interrupted = True
             raise
@@ -224,17 +231,18 @@ class ReplyMixin:
         run.before = await run.store.snapshot()
         self._last_tree = run.before or self._last_tree
 
-    def _check_compaction(self, run: _ReplyRun) -> None:
+    async def _check_compaction(self, run: _ReplyRun) -> None:
         # 推理前框架会自动压缩超阈值的上下文，这里在事件间隙检查
         summary_now = getattr(self.agent.state, "summary", None)
         if summary_now == run.summary_before:
             return
         run.summary_before = summary_now
         run.compacted = True
-        self._record_compaction(
-            str(summary_now or ""), "older messages summarized"
-        )
-        asyncio.create_task(self._update_meta())
+        # 压缩前的用量取本轮开始后的最近一次统计（顶栏当时显示的值），
+        # 压缩本身是框架内部行为，事后再补算压缩后的用量。这里必须等
+        # 补算完再继续，否则卡片会掉到回答后面去。
+        before = run.tokens_before or self._usage_tokens
+        await self._record_compaction_async(str(summary_now or ""), before)
 
     def _report_failure(self, exc: Exception, images: list[Path], run: _ReplyRun) -> None:
         self._notice(
@@ -401,6 +409,8 @@ class ReplyMixin:
         self._queue_delta("text_delta", event.delta)
 
     def _on_tool_call_start(self, event: Any, run: _ReplyRun) -> None:
+        # 工具调用消息本身也进上下文，先让顶栏跟上再等结果
+        self._refresh_meta_soon()
         self._persist_intermediate_text()
         if event.tool_call_name not in READONLY_TOOLS:
             run.mutated = True
@@ -441,6 +451,8 @@ class ReplyMixin:
         self._set_activity(f"{name} running…")
 
     def _on_tool_result_end(self, event: Any, run: _ReplyRun) -> None:
+        # 每次工具返回都会把结果写进上下文，顶栏跟着更新
+        self._refresh_meta_soon()
         state = getattr(event.state, "value", event.state)
         elapsed = time.monotonic() - self._tool_started.pop(
             event.tool_call_id, time.monotonic()
@@ -661,8 +673,12 @@ class ReplyMixin:
         run.output_tokens += event.output_tokens
         run.cache_tokens += event.cache_input_tokens
 
-    def _on_reply_start(self, event: Any, run: _ReplyRun) -> None:
+    async def _on_reply_start(self, event: Any, run: _ReplyRun) -> None:
         self._set_activity("Generating reply…")
+        # 用户消息已经进上下文：这里量到的就是压缩前的真实用量，
+        # 顺手让顶栏跟上（第一次刷新不再等工具结果）。
+        run.tokens_before = await self._context_tokens()
+        self._refresh_meta_soon()
 
     def _on_exceed_max_iters(self, event: Any, run: _ReplyRun) -> None:
         text = "Reached max iterations; reply truncated"

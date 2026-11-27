@@ -21,6 +21,20 @@ def _read_config() -> dict:
 # 原地更新，保证其他模块 import 到的引用在 /reload 后仍然有效
 CONFIG = _read_config()
 
+# 框架要求 max_iters 是一个正整数；0 / 负数在配置里表示“不限制”，
+# 实际传给框架时换成这个哨兵值。用整数而不是 inf：框架会拿它做
+# 比较和日志，inf 会让序列化和格式串出问题。
+UNLIMITED_ITERS = 1_000_000_000
+
+
+def iteration_limit(value: object) -> int:
+    """把配置里的迭代上限转成框架可用的正整数；0 表示不限制。"""
+    try:
+        limit = int(value or 0)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        limit = 0
+    return limit if limit > 0 else UNLIMITED_ITERS
+
 
 def reload_config() -> None:
     """重新读取 config.json。"""

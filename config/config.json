@@ -16,7 +16,7 @@
     "base_url": "https://api.deepseek.com",
     "context_size": 128000,
     "context_trigger_ratio": 0.8,
-    "max_iters": 50,
+    "max_iters": 0,
     "vision": false,
     "reasoning": {
       "default": "high",

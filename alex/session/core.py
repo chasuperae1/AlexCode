@@ -68,6 +68,12 @@ class CoreMixin(BootMixin):
         self._stopping = False
         self._phase = "initializing"
         self._meta_base = ""
+        # 顶栏上下文统计：最近一次口径一致的用量 / 合并刷新的任务与脏标记
+        self._usage_tokens = 0
+        self._meta_task: asyncio.Task | None = None
+        self._meta_dirty = False
+        # 上一次广播出去的 (label, workspace)，用于吞掉重复的 meta 事件
+        self._meta_last: tuple[str, str] | None = None
         self._reply_task: asyncio.Task | None = None
         # 本轮已进入收尾（写历史 / 落盘 / 记检查点），还没放行下一轮。
         # 这一个窗口里 _reply_task 和 _busy 都还占着位置：submit、Esc 与

@@ -48,6 +48,7 @@ from alex.config import (
     CONFIG,
     LOCKED_SKILLS,
     ROOT,
+    iteration_limit,
     load_rules,
     project_path,
     workspace_path,
@@ -59,7 +60,7 @@ from alex.core.permissions import (
 )
 from alex.core.reasoning import request_parameters
 from alex.core.subagents import Subagent
-from alex.core.tools import AskCallback, AskUser, Cmd, PlanTaskCreate, WebSearch
+from alex.core.tools import AskCallback, AskUser, Cmd, WebSearch
 
 
 class ThinkingSafeDeepSeekModel(DeepSeekChatModel):
@@ -109,8 +110,8 @@ def build_toolkit(backend: LocalBackend, mcps: list[MCPClient]) -> Toolkit:
         PowerShell(cwd=workspace, backend=backend)
         if os.name == "nt"
         else None,
-        # 任务清单：框架内置，多步骤任务的进度跟踪（描述按本项目加细粒度要求）
-        PlanTaskCreate(),
+        # 任务清单：只保留查看/更新；建任务仅在 /queue 规划期间临时挂载，
+        # 避免普通对话里模型随手建一堆没人执行、也没人更新的清单。
         TaskList(),
         TaskGet(),
         TaskUpdate(),
@@ -176,6 +177,9 @@ def build_verifier(model, backend, on_result=None) -> Agent:
         model=model,
         toolkit=toolkit,
         on_result=on_result,
+        react_config=ReActConfig(
+            max_iters=iteration_limit(CONFIG["model"].get("max_iters"))
+        ),
     )
 
 
@@ -387,7 +391,9 @@ async def build_agent(
         context_config=ContextConfig(
             trigger_ratio=CONFIG["model"].get("context_trigger_ratio", 0.8),
         ),
-        react_config=ReActConfig(max_iters=CONFIG["model"]["max_iters"]),
+        react_config=ReActConfig(
+            max_iters=iteration_limit(CONFIG["model"].get("max_iters"))
+        ),
     )
     return agent, toolkit, restored
 

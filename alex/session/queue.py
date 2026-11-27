@@ -59,8 +59,9 @@ def plan_prompt(text: str) -> str:
 class QueueMixin:
     """任务队列：入队、逐条执行、确认/取消、卡片更新。"""
 
-    # 规划一轮要连续调几十上百次 TaskCreate：每次工具调用算一次迭代，
-    # 默认 max_iters=50 会把 60 个任务的计划从中间截断，这里临时放宽。
+    # 规划一轮要连续调几十上百次 TaskCreate：每次工具调用算一次迭代。
+    # 默认配置是不限制（max_iters=0），这里只兜底“用户显式调小预算”的情况，
+    # 避免规划被截断；不限制时下面的比较不会改动任何东西。
     PLAN_MAX_ITERS = 120
 
     async def queue(self, text: str) -> dict[str, Any]:
@@ -118,6 +119,23 @@ class QueueMixin:
                 previous_iters = None
         else:
             previous_iters = None
+        # TaskCreate 平时不在工具集里（避免随手建清单），只在规划这一轮
+        # 临时挂上，规划完立刻撤掉；后续执行只用到已有的任务。
+        toolkit = getattr(self.agent, "toolkit", None)
+        added_create = False
+        if toolkit is not None:
+            from alex.core.tools import PlanTaskCreate
+
+            try:
+                existing = await toolkit.get_tool("TaskCreate")
+            except Exception:
+                existing = None
+            if existing is None:
+                try:
+                    await toolkit.add_tool(PlanTaskCreate())
+                    added_create = True
+                except Exception:  # 工具集实现不同：宁可没有也不报错
+                    added_create = False
         try:
             await self._start_turn(plan_prompt(text), f"/queue {text}")
         except asyncio.CancelledError:
@@ -126,6 +144,11 @@ class QueueMixin:
         finally:
             if previous_iters is not None:
                 react.max_iters = previous_iters
+            if added_create:
+                try:
+                    await toolkit.remove_tool("TaskCreate")
+                except Exception:
+                    pass
         if self._queue_stop:
             return None
         new_tasks = [

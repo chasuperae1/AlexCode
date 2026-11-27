@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import asdict
 from typing import Any
+
+from agentscope.message import SystemMsg, UserMsg
 
 
 from alex.config import (
@@ -26,10 +29,52 @@ from alex.session.common import (
 class HistoryMixin:
     """上下文与历史：token 统计、压缩、清空、撤销/重做、检查点回退。"""
 
+    # 顶栏统计的合并刷新间隔：每轮工具结果都可能让它变，但肉眼不需要
+    # 更密；token 计数是本地按字节粗算，不做节流会白刷大量 meta 事件。
+    META_REFRESH_INTERVAL = 0.6
+    # 回复进行中的兜底心跳：框架自己往上下文里塞东西（运行态提示、压缩
+    # 摘要）时没有工具事件，只靠钩子会漏，忙碌时每秒补量一次。
+    META_TICK = 1.0
+
+    async def _tool_schemas(self) -> list[dict[str, Any]]:
+        """当前激活分组下的工具 schema，与模型调用时的集合一致。"""
+        context = getattr(self.agent.state, "tool_context", None)
+        groups = getattr(context, "activated_groups", None) or []
+        return await self.toolkit.get_tool_schemas(groups)
+
+    async def _context_input(self) -> dict[str, Any]:
+        """本轮真正送给模型的输入：system prompt + summary + 对话 + 工具。
+
+        压缩阈值就是拿这一份算的（AgentScope ``_prepare_model_input``）。
+        顶栏、Tokens 页、压缩前后的数字都必须同口径，否则 summary 和系统
+        提示一长，显示值就会比触发值低，看起来像“提前压缩”。
+        """
+        agent = self.agent
+        if agent is None:
+            return {}
+        get_prompt = getattr(agent, "_get_system_prompt", None)
+        if get_prompt is None:
+            return {}
+        try:
+            messages = [
+                SystemMsg(name="system", content=await get_prompt())
+            ]
+            summary = getattr(agent.state, "summary", None)
+            if summary:
+                messages.append(UserMsg(name="user", content=summary))
+            messages.extend(agent.state.context)
+            tools = await self._tool_schemas()
+        except Exception:
+            return {}
+        return {"messages": messages, "tools": tools}
+
     async def _context_tokens(self) -> int:
         if self.agent is None or self.toolkit is None:
             return 0
         try:
+            kwargs = await self._context_input()
+            if kwargs:
+                return int(await self.agent.model.count_tokens(**kwargs))
             tools = await self.toolkit.get_tool_schemas()
             return int(
                 await self.agent.model.count_tokens(
@@ -38,6 +83,63 @@ class HistoryMixin:
             )
         except Exception:
             return 0
+
+    def _compaction_threshold(self) -> int:
+        """压缩触发点（tokens），与框架 ``trigger_ratio * context_size`` 一致。"""
+        agent = self.agent
+        if agent is None:
+            return 0
+        try:
+            cfg = agent.context_config
+            return int(cfg.trigger_ratio * agent.model.context_size)
+        except Exception:
+            return 0
+
+    @staticmethod
+    def _compaction_detail(before: int, threshold: int, after: int) -> str:
+        """压缩卡的一行：压缩前实际用量 / 触发阈值 → 压缩后用量。"""
+        if not before or not after:
+            return ""
+        head = _format_tokens(before)
+        if threshold:
+            head += f" / {_format_tokens(threshold)}"
+        return f"{head} → {_format_tokens(after)}"
+
+    async def _record_compaction_async(self, summary: str, before: int) -> None:
+        """压缩已经发生，补算压缩后用量再落卡片并刷新顶栏。"""
+        after = await self._context_tokens()
+        detail = self._compaction_detail(
+            before, self._compaction_threshold(), after
+        ) or "older messages summarized"
+        self._record_compaction(summary, detail)
+        await self._update_meta()
+
+    def _refresh_meta_soon(self) -> None:
+        """请求刷新顶栏；已有刷新在跑时只置脏标记，由它合并处理。"""
+        self._meta_dirty = True
+        task = self._meta_task
+        if task is not None and not task.done():
+            return
+        self._meta_task = asyncio.create_task(self._meta_refresh_loop())
+
+    async def _meta_refresh_loop(self) -> None:
+        try:
+            while True:
+                self._meta_dirty = False
+                await self._update_meta()
+                # 忙的时候靠心跳持续量；空闲后没有新请求就退出
+                if not (self._busy or self._meta_dirty):
+                    break
+                interval = (
+                    self.META_REFRESH_INTERVAL if self._meta_dirty else self.META_TICK
+                )
+                await asyncio.sleep(interval)
+        finally:
+            self._meta_task = None
+            # 收尾这一瞬新来的请求会看到任务还没结束而直接退出，
+            # 这里补一次，避免最后一次统计丢掉。
+            if self._meta_dirty:
+                self._refresh_meta_soon()
 
     async def _token_snapshot(self) -> dict[str, Any]:
         """设置页 Tokens 分类的数据：上下文占用、去向拆解与会话累计用量。"""
@@ -58,12 +160,8 @@ class HistoryMixin:
             return data
         try:
             model = self.agent.model
-            schemas = await self.toolkit.get_tool_schemas()
-            used = int(
-                await model.count_tokens(
-                    messages=self.agent.state.context, tools=schemas
-                )
-            )
+            schemas = await self._tool_schemas()
+            used = await self._context_tokens()
             tools_tokens = int(
                 await model.count_tokens(messages=[], tools=schemas)
             )
@@ -79,9 +177,18 @@ class HistoryMixin:
             pass
         return data
 
+    def _emit_meta(self) -> None:
+        """顶栏文案没变就不广播，心跳刷新也不会刷屏事件日志。"""
+        payload = {"label": self._meta_base, "workspace": str(workspace_path())}
+        key = (payload["label"], payload["workspace"])
+        if key == self._meta_last:
+            return
+        self._meta_last = key
+        self.emit("meta", payload)
+
     async def _update_meta(self) -> None:
         if self.agent is None or self.toolkit is None:
-            self.emit("meta", {"label": self._meta_base, "workspace": str(workspace_path())})
+            self._emit_meta()
             return
         name = CONFIG["model"]["name"]
         effort = reasoning.current_level(CONFIG["model"])
@@ -91,24 +198,21 @@ class HistoryMixin:
             self._meta_base = label
         try:
             model = self.agent.model
-            tools = await self.toolkit.get_tool_schemas()
-            used = await model.count_tokens(
-                messages=self.agent.state.context, tools=tools
-            )
+            used = await self._context_tokens()
             total = getattr(model, "context_size", 0) or 0
             trigger = self.agent.context_config.trigger_ratio
-            if not total:
-                self._meta_base = label
-            else:
-                remain = max(0, int(total * trigger) - used)
-                self._meta_base = (
-                    f"{label} · Context {used / 1000:.1f}k/"
-                    f"{total / 1000:.0f}k ({used / total:.0%})"
-                    f" · Compact in {remain / 1000:.1f}k"
-                )
+            if not used or not total:
+                raise ValueError("context stats unavailable")
+            self._usage_tokens = used
+            threshold = int(total * trigger)
+            self._meta_base = (
+                f"{label} · Context {used / 1000:.1f}k/"
+                f"{total / 1000:.0f}k ({used / total:.0%})"
+                f" · Compact at {threshold / 1000:.1f}k"
+            )
         except Exception:
             self._meta_base = f"{label} · context stats unavailable"
-        self.emit("meta", {"label": self._meta_base, "workspace": str(workspace_path())})
+        self._emit_meta()
 
     async def _notify_compacting(self, active: bool) -> None:
         """压缩中途的实时状态，仅用于界面提示。"""
@@ -155,9 +259,8 @@ class HistoryMixin:
                 before_tokens and after_tokens < before_tokens
             ):
                 if before_tokens and after_tokens:
-                    detail = (
-                        f"{_format_tokens(before_tokens)} → "
-                        f"{_format_tokens(after_tokens)} tokens"
+                    detail = self._compaction_detail(
+                        before_tokens, self._compaction_threshold(), after_tokens
                     )
                 else:
                     detail = f"{before_msgs} → {after_msgs} messages"

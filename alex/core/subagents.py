@@ -41,7 +41,13 @@ from agentscope.tool import (
 )
 from agentscope.tool._response import ToolResultState
 
-from alex.config import CONFIG, ROOT, load_rules, workspace_path
+from alex.config import (
+    CONFIG,
+    ROOT,
+    iteration_limit,
+    load_rules,
+    workspace_path,
+)
 from alex.core.permissions import (
     ConfirmationMiddleware,
     PermissionGate,
@@ -415,8 +421,8 @@ levels: main agent + one sub agent).
                 trigger_ratio=model_cfg.get("context_trigger_ratio", 0.8),
             ),
             react_config=ReActConfig(
-                max_iters=int(
-                    model_cfg.get("subagent_max_iters", model_cfg["max_iters"])
+                max_iters=iteration_limit(
+                    model_cfg.get("subagent_max_iters", model_cfg.get("max_iters"))
                 ),
             ),
         )

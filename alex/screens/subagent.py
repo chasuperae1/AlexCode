@@ -116,6 +116,9 @@ class SubagentScreen(ModalScreen[None]):
         self._on_permission = on_permission
         self._dirty = False
         self._perm_request_id = ""
+        # 已挂出的正文块：结构化增删/更新用，避免每 0.15s 全量重挂
+        self._chat_rendered: list[tuple[str, str, object]] = []
+        self._static_cache: dict[str, str] = {}
 
     # ------------------------------------------------------------ 布局
     def compose(self) -> ComposeResult:
@@ -203,27 +206,33 @@ class SubagentScreen(ModalScreen[None]):
 
     # ------------------------------------------------------------ 渲染
     def _render_now(self) -> None:
-        try:
-            self.query_one("#subagent-meta", Static).update(self._meta_text())
-            self.query_one("#subagent-rules", Static).update(self._rules_text())
-            self.query_one("#subagent-status", Static).update(self._status_text())
-        except Exception:
-            return
+        self._set_static("#subagent-meta", self._meta_text())
+        self._set_static("#subagent-rules", self._rules_text())
+        self._set_static("#subagent-status", self._status_text())
         self._render_chat()
         self._render_permission()
 
-    def _render_chat(self) -> None:
+    def _set_static(self, selector: str, text: Text) -> None:
+        """文案没变就不 update，省掉每 0.15s 一次的无意义重绘。"""
         try:
-            chat = self.query_one("#subagent-chat", Vertical)
+            widget = self.query_one(selector, Static)
         except Exception:
             return
-        chat.remove_children()
+        key = text.plain
+        if self._static_cache.get(selector) == key:
+            return
+        self._static_cache[selector] = key
+        widget.update(text)
+
+    def _chat_descriptors(self) -> list[tuple[str, str, object]]:
+        """正文块的 (类型, 签名, 内容)；签名不变就不重挂。"""
         theme = self._theme
-        widgets: list = []
-        widgets.append(Static(Text("Task · from main", style=f"bold {theme.accent}"), classes="subagent-role"))
+        items: list[tuple[str, str, object]] = []
+        role = Text("Task · from main", style=f"bold {theme.accent}")
+        items.append(("role", role.plain, role))
         prompt = str(self._record.get("prompt") or "").strip()
         if prompt:
-            widgets.append(MarkdownStatic(prompt, classes="subagent-md"))
+            items.append(("md", prompt, prompt))
         transcript = self._record.get("transcript") or []
         text_seen = False
         for item in transcript:
@@ -231,50 +240,122 @@ class SubagentScreen(ModalScreen[None]):
             if kind == "think":
                 delta = str(item.get("delta") or "").strip()
                 if delta:
-                    widgets.append(
-                        Static(
-                            Text(f"◌ Thought: {delta}", style=theme.secondary),
-                            classes="subagent-think",
-                        )
-                    )
+                    think = Text(f"◌ Thought: {delta}", style=theme.secondary)
+                    items.append(("think", think.plain, think))
             elif kind == "text":
                 delta = str(item.get("delta") or "")
                 if delta.strip():
                     text_seen = True
-                    widgets.append(MarkdownStatic(delta, classes="subagent-md"))
+                    items.append(("md", delta, delta))
             elif kind == "tool":
                 if str(item.get("phase") or "") != "end":
                     continue
                 ok = str(item.get("state") or "") == "success"
                 line = Text()
-                line.append("✓ " if ok else "✗ ", style=theme.success if ok else theme.error)
+                line.append(
+                    "✓ " if ok else "✗ ",
+                    style=theme.success if ok else theme.error,
+                )
                 line.append(str(item.get("name") or "Tool"), style=theme.foreground)
                 elapsed = float(item.get("elapsed") or 0.0)
                 if elapsed:
                     line.append(f" · {elapsed:.1f}s", style=theme.secondary)
-                widgets.append(Static(line, classes="subagent-tool"))
+                items.append(("tool", line.plain, line))
         if not text_seen and str(self._record.get("text") or "").strip():
-            widgets.append(MarkdownStatic(str(self._record.get("text")), classes="subagent-md"))
+            body = str(self._record.get("text") or "")
+            items.append(("md", body, body))
         elif not text_seen and str(self._record.get("result") or "").strip():
-            widgets.append(
-                MarkdownStatic(str(self._record.get("result")), classes="subagent-md")
-            )
+            body = str(self._record.get("result") or "")
+            items.append(("md", body, body))
         status = str(self._record.get("status") or "running")
         if status in {"completed", "failed", "interrupted"}:
             steps = int(self._record.get("steps") or 0)
             seconds = float(self._record.get("elapsed") or 0.0)
             summary = Text()
-            summary.append(f"{steps} steps", style=f"bold {self._theme.primary}")
+            summary.append(f"{steps} steps", style=f"bold {theme.primary}")
             summary.append(
                 f" · {self._record.get('label') or 'Subagent'}"
                 f" · {format_duration(seconds)}",
-                style=self._theme.secondary,
+                style=theme.secondary,
             )
-            widgets.append(Static(summary, classes="subagent-steps"))
+            items.append(("steps", summary.plain, summary))
+        return items
+
+    _BLOCK_CLASS = {
+        "role": "subagent-role",
+        "think": "subagent-think",
+        "tool": "subagent-tool",
+        "steps": "subagent-steps",
+        "md": "subagent-md",
+    }
+
+    def _block_widget(self, kind: str, payload: object):
+        classes = self._BLOCK_CLASS.get(kind, "subagent-md")
+        if kind == "md":
+            return MarkdownStatic(str(payload), classes=classes)
+        return Static(payload, classes=classes)
+
+    @staticmethod
+    def _set_block(widget, payload: object) -> None:
+        if isinstance(widget, MarkdownStatic):
+            widget.update(str(payload))
+        else:
+            widget.update(payload)
+
+    def _render_chat(self) -> None:
+        try:
+            chat = self.query_one("#subagent-chat", Vertical)
+        except Exception:
+            return
+        desired = self._chat_descriptors()
+        rendered = self._chat_rendered
+        same_shape = len(rendered) <= len(desired) and all(
+            item[0] == want[0] for item, want in zip(rendered, desired)
+        )
+        if not same_shape:
+            self._rebuild_chat(chat, desired)
+            return
+        # 同形：已有块按签名原地更新，新增块追加挂载，不整页重排
+        for index, (kind, signature, payload) in enumerate(desired):
+            if index < len(rendered):
+                _, old_signature, widget = rendered[index]
+                if old_signature != signature:
+                    self._set_block(widget, payload)
+                    rendered[index] = (kind, signature, widget)
+                continue
+            widget = self._block_widget(kind, payload)
+            try:
+                chat.mount(widget)
+            except Exception:
+                return
+            rendered.append((kind, signature, widget))
+
+    def _rebuild_chat(self, chat: Vertical, desired: list[tuple[str, str, object]]) -> None:
+        """结构真的变了（重开页面、历史被裁剪）才整块重建，并保留滚动位置。"""
+        scroll_y = 0.0
+        try:
+            scroll_y = self.query_one("#subagent-scroll", VerticalScroll).scroll_y
+        except Exception:
+            pass
+        chat.remove_children()
+        self._chat_rendered = []
+        widgets = [self._block_widget(kind, payload) for kind, _, payload in desired]
         try:
             chat.mount_all(widgets)
         except Exception:
-            pass
+            return
+        self._chat_rendered = [
+            (kind, signature, widget)
+            for (kind, signature, _), widget in zip(desired, widgets)
+        ]
+        if scroll_y:
+            try:
+                scroll = self.query_one("#subagent-scroll", VerticalScroll)
+                self.call_after_refresh(
+                    lambda: scroll.scroll_to(y=scroll_y, animate=False)
+                )
+            except Exception:
+                pass
 
     def _render_permission(self) -> None:
         try:
