@@ -56,6 +56,8 @@ PERSIST_EVENTS = {
     "ask_end",
     "changes",
     "notice",
+    "subagent_start",
+    "subagent_end",
 }
 # 事件环形缓冲：断链重连后 resync 能补上的条数上限（协议两侧共用同一常量）
 BUFFER_SIZE = EVENT_BUFFER_SIZE

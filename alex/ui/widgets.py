@@ -6,7 +6,9 @@ import re
 
 from rich.style import Style
 from rich.text import Text
+from textual import events, on
 from textual._wrap import compute_wrap_offsets
+from textual.binding import Binding
 from textual.widgets import Static
 from termui import PromptInput as TermPromptInput
 
@@ -32,6 +34,11 @@ class PromptInput(TermPromptInput):
     MAX_VISIBLE_LINES = 6
     _last_height: int | None = None
     _last_highlight_text: str | None = None
+
+    BINDINGS = [
+        # 有些终端把 Ctrl+V 自己吃掉做文本粘贴，这条按键能绕过去
+        Binding("ctrl+alt+v", "paste_image", "Paste image", show=False),
+    ]
 
     def _sync_height(self) -> None:
         """按实际显示行数（含自动换行）调整高度，最多 6 行。"""
@@ -77,6 +84,28 @@ class PromptInput(TermPromptInput):
             return
         super().action_paste()
 
+    def action_paste_image(self) -> None:
+        """Ctrl+Alt+V：终端吃掉 Ctrl+V 时的备份通道，直接读剪贴板图片。"""
+        handler = getattr(self.app, "paste_clipboard_image", None)
+        if handler is not None:
+            self.run_worker(handler())
+
+    @on(events.Paste)
+    async def _on_paste_image(self, event: events.Paste) -> None:
+        """终端送来的粘贴是空的时候，说明图片被它吞了：顺带查一次剪贴板。
+
+        Kitty/Ghostty/Windows Terminal 对纯图片剪贴板只发一个空的 bracketed
+        paste（甚至什么都不发）。opencode 也是这么补的：先看剪贴板，再退回
+        文本粘贴。
+        """
+        if (event.text or "").strip():
+            return
+        handler = getattr(self.app, "paste_clipboard_image", None)
+        if handler is None:
+            return
+        event.prevent_default()
+        self.run_worker(handler())
+
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._apply_token_style()
@@ -85,6 +114,14 @@ class PromptInput(TermPromptInput):
         theme = getattr(self, "_theme", None)
         if theme is not None:
             theme.syntax_styles["image-token"] = self.TOKEN_STYLE
+
+    def on_text_area_changed(self, event) -> None:
+        super().on_text_area_changed(event)
+        # 文本一变就按出现位置重排占位符：删图后编号立刻回到 1..N，
+        # 下一张新图才会重新用 image-1，而不是接着历史序号往上加。
+        compact = getattr(self.app, "_compact_pasted_tokens", None)
+        if compact is not None:
+            compact(self)
 
     def _set_theme(self, theme: str) -> None:
         super()._set_theme(theme)

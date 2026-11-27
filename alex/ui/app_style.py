@@ -125,4 +125,166 @@ APP_CSS = """
         color: $accent;
         text-style: bold underline;
     }
+    #subagents {
+        height: 1fr;
+        border: round $primary 30%;
+        margin-top: 1;
+        padding: 1 2 0 2;
+        display: none;
+    }
+    .sa-board {
+        height: 1fr;
+        width: 1fr;
+    }
+    .sa-page-head {
+        height: 1;
+        margin-top: 1;
+    }
+    .sa-title {
+        width: 1fr;
+    }
+    .sa-badges {
+        width: auto;
+    }
+    .sa-sub {
+        height: 1;
+        color: $text-muted;
+        text-wrap: nowrap;
+        text-overflow: ellipsis;
+        overflow: hidden;
+    }
+    #sa-list {
+        height: 1fr;
+        padding: 1 0 0 0;
+        scrollbar-size-vertical: 0;
+    }
+    #sa-cards {
+        height: auto;
+        width: 1fr;
+    }
+    .subagent-card {
+        height: auto;
+        border: round $primary 22%;
+        border-left: thick $primary;
+        padding: 0 1;
+        margin: 0 0 1 0;
+    }
+    .subagent-card.waiting {
+        border-left: thick $warning;
+    }
+    .subagent-card.done {
+        border-left: thick $success;
+    }
+    .subagent-card.failed {
+        border-left: thick $error;
+    }
+    .subagent-card.-selected {
+        background: $primary 12%;
+        border: round $primary 45%;
+        border-left: thick $primary;
+    }
+    .subagent-card.waiting.-selected {
+        background: $warning 10%;
+        border-left: thick $warning;
+    }
+    .subagent-card.done.-selected {
+        border-left: thick $success;
+    }
+    .subagent-card.failed.-selected {
+        border-left: thick $error;
+    }
+    .sa-head {
+        height: 1;
+    }
+    .sa-cursor {
+        width: 2;
+        color: transparent;
+    }
+    .subagent-card.-selected .sa-cursor {
+        color: $primary;
+    }
+    .sa-icon {
+        width: 2;
+    }
+    .sa-name {
+        width: 1fr;
+        text-wrap: nowrap;
+        text-overflow: ellipsis;
+        overflow: hidden;
+    }
+    .sa-pill {
+        width: auto;
+        margin: 0 1;
+    }
+    .sa-meta {
+        width: auto;
+    }
+    .sa-desc {
+        height: auto;
+        max-height: 2;
+        padding: 0 0 0 2;
+        color: $text-muted;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .sa-line {
+        height: 1;
+        padding: 0 0 0 2;
+        text-wrap: nowrap;
+        text-overflow: ellipsis;
+        overflow: hidden;
+    }
+    .sa-perm-head {
+        height: 1;
+        padding: 0 0 0 2;
+    }
+    .sa-perm-sub {
+        height: 1;
+        padding: 0 0 0 2;
+        color: $text-muted;
+        text-wrap: nowrap;
+        text-overflow: ellipsis;
+        overflow: hidden;
+    }
+    .sa-perm-hint {
+        height: 1;
+        padding: 0 0 0 2;
+        color: $text-muted;
+    }
+    .sa-page-foot {
+        height: 2;
+        margin-top: 1;
+        border-top: dashed $primary 20%;
+    }
+    .sa-foot-hint {
+        width: 1fr;
+        color: $text-muted;
+    }
+    .sa-foot-count {
+        width: auto;
+        color: $text-muted;
+    }
+    ChatLog .subagent-row {
+        height: 1;
+        padding: 0 1;
+        margin: 0;
+        text-wrap: nowrap;
+        text-overflow: ellipsis;
+        overflow: hidden;
+    }
+    ChatLog .subagent-row:hover {
+        background: $primary 14%;
+    }
+    ChatLog .subagent-notice {
+        height: 1;
+        padding: 0 1 0 2;
+        margin: 0 0 0 1;
+        border-left: thick $warning;
+        text-wrap: nowrap;
+        text-overflow: ellipsis;
+        overflow: hidden;
+    }
+    ChatLog .subagent-notice:hover {
+        background: $warning 14%;
+    }
     """

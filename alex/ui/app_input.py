@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from pathlib import Path
 
@@ -18,6 +19,19 @@ from alex.ui.widgets import PromptInput
 from alex.ui.app_input_queue import InputQueueMixin
 from alex.ui.app_input_settings import InputSettingsMixin
 from alex.ui.app_input_commands import InputCommandMixin
+
+# 输入框里的图片占位符：[image-1]、[image-2]……
+_IMAGE_TOKEN_RE = re.compile(r"\[image-(\d+)\]")
+
+
+def _offset_to_location(text: str, offset: int) -> tuple[int, int]:
+    """字符偏移换算成 TextArea 的 (行, 列)。"""
+    prefix = text[:offset]
+    return prefix.count("\n"), offset - (prefix.rfind("\n") + 1)
+
+
+def _taken_image_numbers(text: str) -> set[int]:
+    return {int(match.group(1)) for match in _IMAGE_TOKEN_RE.finditer(text)}
 
 
 class InputMixin(InputQueueMixin, InputSettingsMixin, InputCommandMixin):
@@ -79,6 +93,9 @@ class InputMixin(InputQueueMixin, InputSettingsMixin, InputCommandMixin):
             return
         text, images = split_images(value, workspace_path())
         images = [*images, *self._pasted_images_in(text)]
+        # 本轮用掉的占位符可以从映射里移除，避免长期累积
+        for used_token in [token for token in self._pasted_images if token in text]:
+            self._pasted_images.pop(used_token, None)
         if not text and not images:
             return
         self._start_exchange(text, images)
@@ -92,17 +109,10 @@ class InputMixin(InputQueueMixin, InputSettingsMixin, InputCommandMixin):
             return False
         if path is None:
             return False
-        self._paste_seq += 1
-        token = f"[image-{self._paste_seq}]"
-        self._pasted_images[token] = path
         prompt = target if target is not None else self.query_one(
             "#prompt", PromptInput
         )
-        insert = getattr(prompt, "insert_text_at_cursor", None)
-        if insert is not None:
-            insert(token)
-        else:
-            prompt.insert(token)
+        self._insert_pasted_image(prompt, path)
         prompt.focus()
         if not CONFIG.get("model", {}).get("vision", False):
             self.notify(
@@ -111,6 +121,30 @@ class InputMixin(InputQueueMixin, InputSettingsMixin, InputCommandMixin):
                 timeout=4,
             )
         return True
+
+    def _insert_pasted_image(self, prompt, path: Path) -> None:
+        """按输入框里现有几张图给新图编号，再插入占位符。
+
+        编号只看输入框当前内容，不看本次会话粘过多少张：删掉再粘会重新
+        从 image-1 开始，而不是接着历史序号往上加。
+        """
+        self._compact_pasted_tokens(prompt)
+        numbers = _taken_image_numbers(prompt.value)
+        index = 1
+        while index in numbers:
+            index += 1
+        token = f"[image-{index}]"
+        bucket = (
+            self._pasted_images
+            if isinstance(prompt, PromptInput)
+            else self._ask_pasted_images
+        )
+        bucket[token] = path
+        insert = getattr(prompt, "insert_text_at_cursor", None)
+        if insert is not None:
+            insert(token)
+        else:
+            prompt.insert(token)
 
     def action_paste_image(self) -> None:
         """焦点不在输入框时，Ctrl+V 也能粘贴截图。"""
@@ -124,6 +158,36 @@ class InputMixin(InputQueueMixin, InputSettingsMixin, InputCommandMixin):
 
     def _pasted_images_in(self, text: str) -> list[Path]:
         return [path for token, path in self._pasted_images.items() if token in text]
+
+    def _compact_pasted_tokens(self, prompt) -> None:
+        """把输入框里的 ``[image-N]`` 按出现顺序重排成 1..N。
+
+        编号以输入框此刻有几张图为准，而不是本次会话的历史粘贴次数：
+        删掉一张再粘，新图仍然从 image-1 开始。只处理主输入框（TextArea），
+        答题卡的自定义输入是单行 Input，按「最小可用编号」插入即可。
+        """
+        if not isinstance(prompt, PromptInput):
+            return
+        text = prompt.value
+        tokens = list(_IMAGE_TOKEN_RE.finditer(text))
+        snapshot = dict(self._pasted_images)
+        # 从后往前替换：前面的偏移不会被后一次编辑打乱
+        for index in range(len(tokens) - 1, -1, -1):
+            match = tokens[index]
+            token = f"[image-{index + 1}]"
+            if match.group(0) == token:
+                continue
+            prompt.replace(
+                token,
+                _offset_to_location(text, match.start()),
+                _offset_to_location(text, match.end()),
+            )
+        mapping: dict[str, Path] = {}
+        for index, match in enumerate(tokens, start=1):
+            path = snapshot.get(match.group(0))
+            if path is not None:
+                mapping[f"[image-{index}]"] = path
+        self._pasted_images = mapping
 
     def _start_exchange(self, text: str, images: list[Path]) -> None:
         """把消息发给会话；渲染由 exchange_start 事件驱动。"""

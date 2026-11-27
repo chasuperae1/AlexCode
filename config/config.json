@@ -1,5 +1,14 @@
 {
   "theme": "crimson",
+  "notify": {
+    "enabled": true,
+    "sound": "assets/sounds/06_chord_soft.wav",
+    "reply_end": true,
+    "permission": true,
+    "ask": true,
+    "repeat": 1,
+    "cooldown": 2.0
+  },
   "model": {
     "provider": "deepseek",
     "name": "deepseek-flash",

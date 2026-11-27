@@ -14,8 +14,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import os
-from typing import Any
+import time
+import uuid
+from typing import Any, Callable
 
 from agentscope.agent import Agent, ContextConfig, ReActConfig
 from agentscope.message import TextBlock, UserMsg
@@ -38,7 +41,7 @@ from agentscope.tool import (
 )
 from agentscope.tool._response import ToolResultState
 
-from alex.config import CONFIG, load_rules, workspace_path
+from alex.config import CONFIG, ROOT, load_rules, workspace_path
 from alex.core.permissions import (
     ConfirmationMiddleware,
     PermissionGate,
@@ -46,6 +49,72 @@ from alex.core.permissions import (
 )
 from alex.core.tool_chunks import error_chunk
 from alex.core.tools import Cmd, WebSearch
+
+# 当前正在执行的子代理：权限确认据此把请求归属到具体子代理。
+# 每个子代理调用都在独立 task 里执行，ContextVar 天然按调用隔离。
+CURRENT_SUBAGENT: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "alex_current_subagent", default=None
+)
+
+
+def current_subagent() -> dict | None:
+    """返回当前 task 正在执行的子代理信息（没有则返回 None）。"""
+    return CURRENT_SUBAGENT.get()
+
+
+# 运行中的子代理 task：一行事件流里可以按 id 单独取消，互不牵连。
+# task 句柄只在创建它的 loop 里有效，因此取用必须在同一进程（daemon）内。
+_RUNNING: dict[str, asyncio.Task[Any]] = {}
+
+
+def running_subagents() -> list[str]:
+    """当前还在跑的子代理 id，按开始顺序。"""
+    return [sid for sid, task in _RUNNING.items() if not task.done()]
+
+
+def cancel_subagent(subagent_id: str) -> bool:
+    """取消一个子代理；返回是否真的发出取消。
+
+    只取消了这一个 task：同轮其它子代理照常跑，主对话等它们的结果。
+    """
+    task = _RUNNING.get(str(subagent_id or ""))
+    if task is None or task.done():
+        return False
+    task.cancel()
+    return True
+
+
+class _DeltaCoalescer:
+    """把子代理的正文/思考增量攒 80ms 再发，避免事件风暴。"""
+
+    def __init__(self, emit: Callable[[str, dict], None]) -> None:
+        self._emit = emit
+        self._buffers: dict[str, str] = {}
+        self._handle: asyncio.TimerHandle | None = None
+
+    def add(self, channel: str, delta: str) -> None:
+        if not delta:
+            return
+        self._buffers[channel] = self._buffers.get(channel, "") + delta
+        if self._handle is not None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self.flush()
+            return
+        self._handle = loop.call_later(0.08, self.flush)
+
+    def flush(self) -> None:
+        if self._handle is not None:
+            self._handle.cancel()
+            self._handle = None
+        if not self._buffers:
+            return
+        pending, self._buffers = self._buffers, {}
+        for channel, text in pending.items():
+            self._emit("subagent_delta", {"channel": channel, "delta": text})
+
 
 # 子代理能用的工具：完整读写 + 命令执行 + 联网检索
 SUBAGENT_TOOLS = (
@@ -189,6 +258,7 @@ levels: main agent + one sub agent).
         backend,
         gate: PermissionGate | None = None,
         toolkit: Toolkit | None = None,
+        on_event: Callable[[str, dict], None] | None = None,
     ) -> None:
         super().__init__()
         self._model = model
@@ -197,6 +267,8 @@ levels: main agent + one sub agent).
         self._gate = gate or PermissionGate()
         # 复用主代理 toolkit 的 skills / MCP 配置，子代理因此拥有同样能力
         self._toolkit = toolkit
+        # 子代理生命周期/流式事件回调；由会话层接进事件总线
+        self._on_event = on_event or (lambda _kind, _data: None)
 
     async def check_permissions(
         self,
@@ -223,19 +295,95 @@ levels: main agent + one sub agent).
                 "full task."
             )
         description = (description or "").strip()
-        try:
-            text = await self._run(description, prompt)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # 模型/工具异常交还给主代理
-            return error_chunk(f"Subagent failed: {exc}")
+        subagent_id = f"sa_{uuid.uuid4().hex[:8]}"
+        label = description or "Subagent"
+        task_hint = next(
+            (line.strip() for line in prompt.splitlines() if line.strip()), ""
+        )[:160]
+        started = time.monotonic()
+        model_name = str(CONFIG.get("model", {}).get("name", "") or "")
 
+        def emit(kind: str, data: dict) -> None:
+            self._on_event(kind, {"id": subagent_id, **data})
+
+        emit(
+            "subagent_start",
+            {
+                "label": label,
+                "description": task_hint,
+                "model": model_name,
+                "prompt": prompt[:2000],
+                "started_at": started,
+            },
+        )
+        token = CURRENT_SUBAGENT.set({"id": subagent_id, "label": label})
+        progress: dict[str, int] = {"steps": 0}
+        task = asyncio.current_task()
+        if task is not None:
+            _RUNNING[subagent_id] = task
+        try:
+            text, steps = await self._run(description, prompt, emit, progress)
+        except asyncio.CancelledError:
+            # 单条 stop 取消的是这一条：把中断结果交回主代理，整轮继续
+            emit(
+                "subagent_end",
+                {
+                    "state": "interrupted",
+                    "seconds": time.monotonic() - started,
+                    "steps": int(progress.get("steps") or 0),
+                    "error": "stopped by user",
+                },
+            )
+            return error_chunk(
+                "Subagent stopped by user; its partial findings are "
+                "unavailable — continue without it."
+            )
+        except Exception as exc:  # 模型/工具异常交还给主代理
+            emit(
+                "subagent_end",
+                {
+                    "state": "failed",
+                    "seconds": time.monotonic() - started,
+                    "steps": 0,
+                    "error": str(exc),
+                },
+            )
+            return error_chunk(f"Subagent failed: {exc}")
+        finally:
+            _RUNNING.pop(subagent_id, None)
+            CURRENT_SUBAGENT.reset(token)
+
+        seconds = time.monotonic() - started
+        write_subagent_transcript(subagent_id, label, prompt, text)
+        emit(
+            "subagent_end",
+            {
+                "state": "completed",
+                "seconds": seconds,
+                "steps": steps,
+                "result": text[:2000],
+            },
+        )
         return ToolChunk(
             content=[TextBlock(text=text or "(subagent returned no text)")],
             state=ToolResultState.SUCCESS,
         )
 
-    async def _run(self, description: str, prompt: str) -> str:
+    async def _run(
+        self,
+        description: str,
+        prompt: str,
+        emit: Callable[[str, dict], None],
+        progress: dict[str, int],
+    ) -> tuple[str, int]:
+        from agentscope.event import (
+            TextBlockDeltaEvent,
+            ThinkingBlockDeltaEvent,
+            ToolCallStartEvent,
+            ToolResultEndEvent,
+        )
+        from agentscope.message import Msg
+
         workspace = workspace_path(create=True)
         basic = (
             self._toolkit.tool_groups[0]
@@ -272,5 +420,99 @@ levels: main agent + one sub agent).
                 ),
             ),
         )
-        msg = await agent.reply(UserMsg(name="user", content=prompt))
-        return (msg.get_text_content() or "").strip()
+        msg = UserMsg(name="user", content=prompt)
+        coalescer = _DeltaCoalescer(emit)
+        text_parts: list[str] = []
+        tool_started: dict[str, float] = {}
+        tool_names: dict[str, str] = {}
+        steps = 0
+        final_text = ""
+
+        def handle(event: Any) -> None:
+            nonlocal steps
+            if isinstance(event, TextBlockDeltaEvent):
+                text_parts.append(event.delta)
+                coalescer.add("text", event.delta)
+            elif isinstance(event, ThinkingBlockDeltaEvent):
+                coalescer.add("thinking", event.delta)
+            elif isinstance(event, ToolCallStartEvent):
+                steps += 1
+                progress["steps"] = steps
+                tool_started[event.tool_call_id] = time.monotonic()
+                tool_names[event.tool_call_id] = event.tool_call_name
+                emit(
+                    "subagent_tool",
+                    {
+                        "call_id": event.tool_call_id,
+                        "name": event.tool_call_name,
+                        "phase": "start",
+                        "state": "running",
+                        "elapsed": 0.0,
+                    },
+                )
+            elif isinstance(event, ToolResultEndEvent):
+                state = getattr(event.state, "value", event.state)
+                elapsed = time.monotonic() - tool_started.pop(
+                    event.tool_call_id, time.monotonic()
+                )
+                emit(
+                    "subagent_tool",
+                    {
+                        "call_id": event.tool_call_id,
+                        "name": tool_names.pop(event.tool_call_id, "Tool"),
+                        "phase": "end",
+                        "state": str(state),
+                        "elapsed": elapsed,
+                    },
+                )
+            elif isinstance(event, Msg):
+                content = event.get_text_content()
+                if content:
+                    final_text = content
+
+        try:
+            async for event in agent.reply_stream(msg, yield_final_msg=True):
+                if not isinstance(
+                    event, (TextBlockDeltaEvent, ThinkingBlockDeltaEvent)
+                ):
+                    coalescer.flush()
+                handle(event)
+        finally:
+            # 取消 / 异常时也要把已积累的增量发出去，正文不丢半句
+            coalescer.flush()
+        return (final_text or "".join(text_parts)).strip(), steps
+
+
+def write_subagent_transcript(
+    subagent_id: str, label: str, prompt: str, text: str
+) -> None:
+    """子代理完整正文落盘：事件里只传摘要，长输出不进协议。"""
+    directory = ROOT / "data" / "subagents"
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        body = [
+            f"# {label}",
+            "",
+            "## Task",
+            "",
+            prompt,
+            "",
+            "## Result",
+            "",
+            text,
+        ]
+        path = directory / f"{subagent_id}.md"
+        path.write_text("\n".join(body), encoding="utf-8")
+        # 只保留最近 60 份，避免无限堆积
+        entries = sorted(
+            directory.glob("sa_*.md"),
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        )
+        for stale in entries[60:]:
+            try:
+                stale.unlink()
+            except OSError:
+                pass
+    except OSError:  # 落盘失败不影响子代理结果
+        pass

@@ -194,9 +194,13 @@ class HistoryMixin:
         self._backend = backend
         self.agent, self.toolkit, _ = await build_agent(
             model, backend, self.mcps, gate=self._permission_gate, ask=self._ask_user,
-            on_compacting=self._notify_compacting
+            on_compacting=self._notify_compacting,
+            on_subagent_event=self._on_subagent_event,
         )
-        self.history = [(ASSISTANT, "Session cleared. What should we do next?")]
+        # 清空后不塞任何占位消息：聊天区应该真正空白，提示只走一次性 toast
+        self.history = []
+        self._subagents = {}
+        self._progress_state = {"text": "", "tone": "primary"}
         self.stream_text = ""
         self.thinking = ""
         self._session_usage = {
@@ -211,6 +215,7 @@ class HistoryMixin:
             {**self._history_view(), "checkpoints": []},
         )
         self.emit("checkpoints", {"checkpoints": []})
+        self.emit("progress", dict(self._progress_state))
         self._refresh_tasks()
         await self._update_meta()
         self._notice("Session cleared", timeout=2)
@@ -277,6 +282,7 @@ class HistoryMixin:
         save_state(self.agent.state)
 
         self.history = self._history_from_state(self.agent.state)
+        self._subagents = {}
         self._revert["index"] = index
         self._revert["prompt"] = checkpoint.prompt
         await self._rebuild_agent()
@@ -308,6 +314,7 @@ class HistoryMixin:
 
         save_state(self.agent.state)
         self.history = self._history_from_state(self.agent.state)
+        self._subagents = {}
         self._revert = None
         await self._rebuild_agent()
         self.emit(

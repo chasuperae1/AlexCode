@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import time
-
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -13,6 +11,7 @@ from termui.widgets import SPINNER_FRAMES
 
 from alex.ui.markdown import MarkdownStatic
 from alex.ui.widgets import ChangesSummary, UserMessage
+from alex.ui.activity import SubagentNotice, SubagentRow
 
 
 class CompactionStatus(Static):
@@ -143,20 +142,14 @@ class ChatLog(VerticalScroll):
     只更新正在流式输出的那一个控件，避免整段对话反复重排。
     """
 
-    # 一次性挂载整段历史后，Markdown 高度要分几帧、按实际宽度重排才稳定，
-    # 所以贴底不能只做一次：短时间跟随内容变化，高度稳定后再停。
-    FOLLOW_INTERVAL = 0.1
-    FOLLOW_MAX_SECONDS = 3.0
-    # 高度是按批稳定的：几帧之内 max_scroll_y 可能连续两次不变，随后又长一截。
-    # 太早判定“稳定”就会停在半页，所以至少跟随这么久再允许停。
-    FOLLOW_MIN_SECONDS = 1.2
+    # 一格滚轮的步长与动画：终端滚轮事件是离散的，一次挪 2 行且不带动画，
+    # 连续滚动时看起来就是“一格一格跳”。3 行 + 80ms 缓动，连续触发时
+    # 目标位置会累加，视觉上是连续滑动而不是瞬移。
+    WHEEL_STEP = 3
+    WHEEL_DURATION = 0.08
+    WHEEL_EASING = "out_cubic"
+    # 历史重建 / 补页期间由应用接管视口，这里不要再触发“回到底部就跟随”。
     _suspend_scroll = False
-    _follow_timer = None
-    _follow_last_max = -1
-    _follow_stable = 0
-    _follow_last_y = 0
-    _follow_deadline = 0.0
-    _follow_started = 0.0
 
     DEFAULT_CSS = """
     ChatLog {
@@ -313,6 +306,57 @@ class ChatLog(VerticalScroll):
     def compose(self) -> ComposeResult:
         yield Vertical(id="chat-body")
 
+    def on_mount(self) -> None:
+        # 贴底交给框架的 scroll anchor：布局每长高一次就自动把视口钉到底部，
+        # 用户一旦自己滚动（scroll_to 会 release_anchor）就不再跟随。
+        # 之前自研的 100ms 跟随定时器会在用户上翻时反复把视口拽回底部。
+        self.anchor(True)
+
+    @property
+    def is_following(self) -> bool:
+        """是否仍在“新内容长出来就跟到底部”的跟随状态。"""
+        return self.is_anchored and not self._anchor_released
+
+    def watch_scroll_y(self, old_value: float, new_value: float) -> None:
+        # 用户自己滚回底部（或程序把视口放回底部）时重新挂上跟随，
+        # 之后新内容继续自动贴底；停在中途则保持不动。
+        super().watch_scroll_y(old_value, new_value)
+        if (
+            self.is_anchored
+            and self._anchor_released
+            and not self._suspend_scroll
+            and new_value >= self.max_scroll_y - 1
+        ):
+            self._anchor_released = False
+
+    def _scroll_down_for_pointer(self, **_kwargs) -> bool:
+        return self._wheel(1)
+
+    def _scroll_up_for_pointer(self, **_kwargs) -> bool:
+        return self._wheel(-1)
+
+    def _wheel(self, direction: int) -> bool:
+        """滚轮：按目标位置累加并做短缓动，连续滚动是连续位移。
+
+        ``immediate=True`` 很关键：容器版的 ``scroll_to`` 默认延后到下一次
+        刷新才真正滚动，每个滚轮事件都白白多等一帧，滑起来就是拖沓。
+        """
+        if not self.allow_vertical_scroll:
+            return False
+        target = self.scroll_target_y + direction * self.WHEEL_STEP
+        self.scroll_to(
+            y=target,
+            animate=True,
+            duration=self.WHEEL_DURATION,
+            easing=self.WHEEL_EASING,
+            immediate=True,
+        )
+        if direction > 0 and target >= self.max_scroll_y:
+            # 滚到底就重新挂上跟随：之后新内容继续自动贴底。已经贴底时
+            # scroll_to 不会改 scroll_y，watch_scroll_y 也就不会触发。
+            self._anchor_released = False
+        return True
+
     def on_resize(self, event) -> None:
         # 聊天区宽度是 Markdown 排版的唯一来源：布局定下来后写进渲染上下文，
         # 块跟着统一重排（同一宽度同一份源文本只会解析一次）。
@@ -362,6 +406,11 @@ class ChatLog(VerticalScroll):
             handler = getattr(self.app, "open_message_actions", None)
             if handler is not None:
                 handler(event.widget)
+        elif isinstance(event.widget, (SubagentRow, SubagentNotice)):
+            event.stop()
+            handler = getattr(self.app, "open_subagent", None)
+            if handler is not None:
+                handler(event.widget.subagent_id)
         elif isinstance(event.widget, ChangesSummary):
             event.stop()
             handler = getattr(self.app, "open_change_diff", None)
@@ -382,85 +431,29 @@ class ChatLog(VerticalScroll):
         self._mount(widget)
 
     def _mount(self, widget) -> None:
+        # 贴底不需要在这里手动做：ChatLog 还处于 anchor 状态时，框架在
+        # 下一次布局就把视口钉到新的底部；用户已经滚开（anchor 被 release）
+        # 时则保持当前位置，不会像以前那样每挂一块控件就把读者拽回底部。
         self.query_one("#chat-body").mount(widget)
-        # 正在看历史窗口时不要把人拽到底部；新消息照常挂在窗口下方，
-        # 回到最新时整体重建再显示。
-        if not self._suspend_scroll and getattr(
-            self.app, "_window_start", None
-        ) is None:
-            self.call_after_refresh(self._pin_to_bottom)
-
-    def _pin_to_bottom(self) -> None:
-        """新控件挂上后贴底：高度要等布局完才算准，所以刷两帧。"""
-        self.scroll_end(animate=False)
-        self.call_after_refresh(self.scroll_end, animate=False)
 
     def pin_bottom(self) -> None:
-        """外部（历史重建等）请求贴底，复用挂载时的两帧逻辑。"""
-        self._pin_to_bottom()
+        """外部（历史重建等）请求贴底。"""
+        self.anchor(True)
 
-    def follow_bottom(self, seconds: float = FOLLOW_MAX_SECONDS) -> None:
-        """贴底并在内容高度稳定前持续跟随。
-
-        历史整体重建时 ``mount_all`` 一次挂上几十上百个 Markdown 控件，首帧
-        只算出了部分高度；只贴一次会停在半途，重启后视口仍不在最新消息处。
-        这里每帧贴一次，到过底部且连续两帧高度不变（并且已经跟随
-        ``FOLLOW_MIN_SECONDS``）才停。
-        """
-        self._follow_deadline = time.monotonic() + seconds
-        self._follow_started = time.monotonic()
-        self._follow_last_max = -1
-        self._follow_stable = 0
-        self._pin_to_bottom()
-        # 以“当前位置”作为防误判基准：scroll_end 可能还要等一帧布局才生效，
-        # 此时直接拿 max_scroll_y 当基准，会把应用自己的贴底当成用户上翻而停掉。
-        self._follow_last_y = self.scroll_y
-        if self._follow_timer is None:
-            self._follow_timer = self.set_interval(
-                self.FOLLOW_INTERVAL, self._follow_tick
-            )
-
-    def _follow_tick(self) -> None:
-        max_y = self.max_scroll_y
-        # 高度还在长（max 变大）时，旧的最大值不代表用户上翻，先别下结论。
-        grew = max_y > self._follow_last_max
-        if (
-            not grew
-            and self._follow_last_y
-            and self.scroll_y + 3 < self._follow_last_y
-        ):
-            # 用户自己往上翻了：立即停止跟随，别把人拽回底部
-            self._stop_follow()
-            return
-        self.scroll_end(animate=False)
-        self._follow_last_y = max_y
-        at_bottom = self.scroll_y >= self.max_scroll_y - 1
-        if max_y == self._follow_last_max and at_bottom:
-            self._follow_stable += 1
-        else:
-            self._follow_stable = 0
-        self._follow_last_max = max_y
-        now = time.monotonic()
-        if (
-            self._follow_stable >= 2
-            and now - self._follow_started >= self.FOLLOW_MIN_SECONDS
-        ):
-            self._stop_follow()
-        elif now >= self._follow_deadline:
-            self._stop_follow()
+    def follow_bottom(self) -> None:
+        """贴底并持续跟随：交给框架 anchor，高度分几帧长出来也会跟上。"""
+        self._stop_follow()
+        self.anchor(True)
 
     def _stop_follow(self) -> None:
-        self._follow_stable = 0
-        self._follow_last_max = -1
-        self._follow_last_y = 0
-        if self._follow_timer is not None:
-            self._follow_timer.stop()
-            self._follow_timer = None
+        """解除贴底跟随，把视口交给调用方。"""
+        self.release_anchor()
 
     def stop_follow(self) -> None:
         """外部要自己摆弄历史窗口时先停掉贴底跟随。
 
-        跟随定时器每 100ms 会把视口贴到底部；翻历史时一边前插补滚动、一边被
-        它拽回底部，读者就会感觉“划不动、一松手又被拉走”。
+        跟随状态下每帧布局都会把视口钉回底部；翻历史时一边前插补滚动、
+        一边被拽回底部，读者就会感觉“划不动、一松手又被拉走”。
         """
         self._stop_follow()
+

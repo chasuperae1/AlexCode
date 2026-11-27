@@ -22,7 +22,7 @@ ASSISTANT = "assistant"
 _IMAGE_TOKEN = re.compile(r"\[image-\d+\]")
 
 
-PROMPT_PLACEHOLDER = "Message…  Enter to send · Shift+Enter newline · F6 paste image"
+PROMPT_PLACEHOLDER = "Message…  Enter to send · Shift+Enter newline · Ctrl+V / F6 image"
 
 
 QUEUE_CARD_LIMIT = 10

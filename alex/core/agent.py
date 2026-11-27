@@ -317,6 +317,7 @@ async def build_agent(
     gate: PermissionGate | None = None,
     ask: AskCallback | None = None,
     on_compacting: Callable[[bool], Awaitable[None]] | None = None,
+    on_subagent_event: Callable[[str, dict], None] | None = None,
 ) -> tuple[Agent, Toolkit, bool]:
     state, restored = load_state()
     state.permission_context.mode = resolve_permission_mode(
@@ -326,7 +327,13 @@ async def build_agent(
     toolkit = build_toolkit(backend, mcps)
     # 并行子代理：同一轮多次调用由框架并发执行，角色由 prompt 定义
     await toolkit.add_tool(
-        Subagent(model=model, backend=backend, gate=gate, toolkit=toolkit)
+        Subagent(
+            model=model,
+            backend=backend,
+            gate=gate,
+            toolkit=toolkit,
+            on_event=on_subagent_event,
+        )
     )
     # 选择题提问：由会话层把问题转成 UI 事件并等待用户回答
     await toolkit.add_tool(AskUser(ask=ask))

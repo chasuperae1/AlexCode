@@ -40,6 +40,7 @@ HISTORY_KINDS: frozenset[str] = frozenset(
         "compaction",
         "changes",
         "stats",
+        "subagent",
     }
 )
 
@@ -50,6 +51,7 @@ DEDUPE_FIELDS: dict[str, tuple[str, ...]] = {
     "changes": ("checkpoint", "exchange_id"),
     "shell_card": ("request_id",),
     "stats": ("exchange_id",),
+    "subagent": ("id",),
 }
 
 

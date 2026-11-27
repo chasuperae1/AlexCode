@@ -74,12 +74,18 @@ class ChromePaletteMixin:
         prompt.focus()
 
     def action_palette_up(self) -> None:
+        if self._subagent_key_move(-1):
+            return
         self._move_palette(-1)
 
     def action_palette_down(self) -> None:
+        if self._subagent_key_move(1):
+            return
         self._move_palette(1)
 
     def action_palette_accept(self) -> None:
+        if self._subagent_key_open():
+            return
         self._accept_palette()
 
     def action_palette_complete(self) -> None:

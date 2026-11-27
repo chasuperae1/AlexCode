@@ -7,6 +7,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Collapsible, Static
 
 from alex.screens.picker import PickerScreen
+from alex.sound import chime
 from alex.ui.activity import MIN_VISIBLE_SECONDS, format_duration
 from alex.ui.constants import PROMPT_PLACEHOLDER
 from alex.ui.panels import GoalCard
@@ -61,6 +62,11 @@ class ChromeMixin(ChromeThemeMixin, ChromePaletteMixin):
         if phase not in terminal:
             self._goal_phase = phase
         self._goal_confirming = phase == "awaiting_confirmation"
+        # 目标卡转到“等你确认/等你选细节”时提醒一次
+        needs_you = phase in {"awaiting_confirmation", "clarifying"}
+        if needs_you and not self._goal_needs_you:
+            chime("ask")
+        self._goal_needs_you = needs_you
         card = self._goal_card_widget
         if card is None:
             card = GoalCard(data, self.current_theme)
@@ -114,7 +120,11 @@ class ChromeMixin(ChromeThemeMixin, ChromePaletteMixin):
 
     def _set_queue_confirming(self, active: bool, total: int = 0) -> None:
         """切换确认阶段：锁定输入框，并恢复提示文案。"""
+        was = self._queue_confirming
         self._queue_confirming = active
+        if active and not was:
+            # 队列进入“按 enter 才开始”的等待态，也算需要你操作
+            chime("ask")
         if active:
             self._queue_total = total
         else:
@@ -179,7 +189,10 @@ class ChromeMixin(ChromeThemeMixin, ChromePaletteMixin):
             pass
 
     def _task_status_text(self) -> Text | None:
-        """Input-bar status: live subagent / shell counts and longest runtime."""
+        """Input-bar status: subagent chip, or live shell counts."""
+        chip = self._subagent_chip()
+        if chip is not None:
+            return chip
         summary = self._live_runs.summary()
         if summary.total == 0 or summary.elapsed < MIN_VISIBLE_SECONDS:
             return None
@@ -218,6 +231,9 @@ class ChromeMixin(ChromeThemeMixin, ChromePaletteMixin):
             widget.set_class(True, "-visible")
 
     def _tick_task_status(self) -> None:
+        if getattr(self, "_subagents", None):
+            self._refresh_task_status()
+            return
         if self._live_runs.summary().total:
             self._refresh_task_status()
 

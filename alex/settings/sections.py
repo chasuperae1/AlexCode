@@ -8,7 +8,7 @@ from textual.widgets import Markdown, Select, Static
 
 from alex.config import LOCKED_SKILLS
 from alex.settings.constants import _mode_value
-from alex.settings.widgets import ModeSwitch, StatusDot
+from alex.settings.widgets import ModeSwitch, StatusDot, ThemeSwitch
 
 
 class SectionsMixin:
@@ -222,7 +222,7 @@ class SectionsMixin:
         """点击落在开关或下拉框上时，交给控件自己处理。"""
         node = widget
         while node is not None and node is not self:
-            if isinstance(node, (Select, StatusDot, ModeSwitch)):
+            if isinstance(node, (Select, StatusDot, ModeSwitch, ThemeSwitch)):
                 return True
             node = node.parent
         return False

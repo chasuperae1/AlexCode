@@ -24,13 +24,14 @@ Built on [AgentScope](https://github.com/agentscope-ai/agentscope) and
 | **Permission modes** | `accept` / `bypass` / `explore`; dangerous commands are matched against a regex table, and file edits are shown as an inline diff before confirmation |
 | **Goal mode** | `/goal <goal>` starts an executor + independent verifier loop that keeps fixing until the verifier passes |
 | **Task queue** | `/queue taskA; taskB` splits a request into fine-grained tasks (one per verifiable unit) and runs them one after another with progress in the top bar |
-| **Sub-agents** | The main agent can dispatch self-contained sub-agents; multiple calls in one reply run concurrently with isolated context |
+| **Sub-agents** | The main agent can dispatch self-contained sub-agents; multiple calls in one reply run concurrently with isolated context. The list opens in the chat area (click the `◐ N subagents` chip), `↑↓` picks one, `Enter` opens its read-only session, `Ctrl+X` stops just that one |
 | **MCP** | Connects to stdio and http servers from `config/mcp_servers.json` concurrently; a failing server is skipped, not fatal |
 | **Skills / rules** | `skills/*/SKILL.md` is loaded on demand, `rules/*.md` is injected into the system prompt; both can be toggled in Settings |
 | **Snapshots** | A workspace snapshot per turn; click a past message to restore files and conversation to that moment |
-| **Five themes** | Crimson / Dark / Light / Mono / Ember, cycle with `Ctrl+T`, choice is persisted |
-| **Image input** | `/image <path>` or paste a screenshot from the clipboard |
+| **Five themes** | Crimson / Dark / Light / Mono / Ember — pick one on the Settings → Preference card, or cycle with `Ctrl+T`; the choice is persisted |
+| **Image input** | `/image <path>`, a pasted image path, or `Ctrl+V` to grab a screenshot from the clipboard |
 | **Multiple models** | deepseek / openai / openai-compatible / custom gateway, with adjustable reasoning effort |
+| **Notification chime** | A short WAV plays when a reply finishes or the agent is waiting for approval / an answer, so you can look away and still know when it needs you |
 
 ## A look at the UI
 
@@ -98,6 +99,7 @@ Secrets live only in `.env` (already git-ignored). `config/config.json` stores j
 | `model.context_size` / `context_trigger_ratio` | Context window and compaction threshold (0.8 by default) |
 | `workdir` | Workspace; relative paths resolve against the project root, defaults to `agent_workspace` |
 | `permission_mode` | `accept` / `bypass` / `explore` |
+| `notify.*` | Desktop chime switches and tone choice; see _Notification sound_ below |
 | `dangerous_commands` | Regex table for dangerous commands; a match forces a confirmation (except in `bypass`) |
 | `memory_dir` / `snapshot_dir` | Where memory and snapshots live |
 | `memory_consolidation_minutes` | Background merge interval (30 minutes by default) |
@@ -105,6 +107,29 @@ Secrets live only in `.env` (already git-ignored). `config/config.json` stores j
 
 Editing an existing field takes effect after `/reload`; adding new fields or changing code
 under `alex/` requires a restart.
+
+### Notification sound
+
+The TUI plays a short WAV when it needs you back: a reply finishes, a permission card
+appears, or a question is waiting for an answer. It defaults to
+`assets/sounds/06_chord_soft.wav`; any PCM WAV works.
+
+| Field | Default | Purpose |
+|---|---|---|
+| `notify.enabled` | `true` | Master switch |
+| `notify.sound` | `assets/sounds/06_chord_soft.wav` | Path relative to the project root |
+| `notify.reply_end` / `permission` / `ask` | `true` | Per-event switches |
+| `notify.repeat` | `1` | How many times to play |
+| `notify.cooldown` | `2.0` | Seconds before the same event may chime again |
+
+Playback uses the Windows `winsound` API on a background thread: nothing extra to install and
+the UI never blocks. A chime is skipped while a `/queue` still has tasks to run, when you
+stopped the reply yourself, and on non-Windows platforms. `assets/sounds/` also holds the
+other candidate tones — point `notify.sound` at any of them.
+
+The **Reply chime** switch on the Preference tab is the same as `notify.enabled`: flipping it
+writes the field back to `config/config.json` immediately, so the next reply in the running
+session is already silent (or audible) without a restart.
 
 ### MCP
 
@@ -158,14 +183,15 @@ next system prompt ◄───────────────────�
 |---|---|---|---|
 | `/model` | Pick model and reasoning effort | `/queue` | Run several tasks sequentially |
 | `/permission` | Switch permission mode | `/goal` | Goal mode (execute + verify loop) |
-| `/settings` | Settings (Tokens/Rules/Skills/MCP/Memory) | `/image` | Send an image |
+| `/settings` | Settings (Tokens/Rules/Skills/MCP/Memory/Preference) | `/image` | Send an image |
 | `/cd` | Change workspace | `/compact` | Compact context manually |
-| `/theme` | Switch theme | `/init memory` | Clear long-term memory |
-| `/reload` | Reload config, skills, rules, MCP | `/clear` | Clear the current session |
-| `/help` | Command cheat sheet | `/exit` | Quit |
+| `/reload` | Reload config, skills, rules, MCP | `/init memory` | Clear long-term memory |
+| `/help` | Command cheat sheet | `/clear` | Clear the current session |
+| `/exit` | Quit |  |  |
 
 Keys: `Enter` sends, `Shift+Enter` newline, `Ctrl+T` cycles themes, `Ctrl+L` clears,
-`Ctrl+O` toggles debug logs, `Ctrl+Q` quits, `Esc` interrupts generation or closes a modal.
+`Ctrl+O` toggles debug logs, `Ctrl+Q` quits, `Esc` interrupts generation or closes
+a modal, `Ctrl+X` (inside the sub-agent list) stops the selected sub-agent.
 
 `skills/alexcode` is a read-only manual bundled with the project — you can simply ask it
 "how do I configure an MCP server".

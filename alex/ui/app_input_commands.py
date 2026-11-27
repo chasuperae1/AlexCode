@@ -19,7 +19,6 @@ class InputCommandMixin:
         "/cd": "_cmd_cd",
         "/init": "_cmd_init",
         "/help": "_cmd_help",
-        "/theme": "_cmd_theme",
         "/reload": "_cmd_reload",
         "/image": "_cmd_image",
         "/compact": "_cmd_compact",
@@ -108,10 +107,10 @@ class InputCommandMixin:
             " · /settings skills / rules / memory / tokens / MCP"
             " · /cd browse workspace · /init memory clear memory"
             " · paste an image path or /image <path> [prompt]"
-            " · F6 / Alt+V paste clipboard screenshot"
+            " · F6 / Alt+V / Ctrl+V paste clipboard screenshot"
             " · click a user message to restore it"
             " · click a change summary to view its diff"
-            " · /reload reload config · /clear clear session · /theme choose theme"
+            " · /reload reload config · /clear clear session"
             " · /compact compress context"
             " · /queue split the request into tasks, run them in order"
             " · /goal work until an independent verifier passes it"
@@ -119,9 +118,6 @@ class InputCommandMixin:
             severity="warning",
             timeout=10,
         )
-
-    def _cmd_theme(self, arg: str) -> None:
-        self._open_theme_picker()
 
     def _cmd_reload(self, arg: str) -> None:
         if self._reject_when_busy("reload"):

@@ -12,7 +12,7 @@ from textual.widgets import Markdown, Select, Static
 
 from alex.config import LOCKED_SKILLS
 from alex.settings.constants import MODE_OPTIONS, _mode_value, _short_tokens
-from alex.settings.widgets import ModeSwitch, StatusDot
+from alex.settings.widgets import ModeSwitch, StatusDot, ThemeSwitch
 
 
 @dataclass
@@ -276,6 +276,79 @@ class SettingsLayoutMixin:
                 "verification are unaffected. Applies from the "
                 "next turn.",
                 id="settings-pref-note",
+                classes="settings-pref-note",
+            )
+        with Vertical(classes="settings-card", id="settings-notify-card"):
+            with Horizontal(classes="settings-card-head"):
+                yield Static(
+                    "NOTIFICATION",
+                    classes="settings-memory-label",
+                )
+                yield Static(
+                    "desktop",
+                    classes="settings-memory-count",
+                )
+            with Horizontal(classes="settings-pref-row"):
+                with Vertical(classes="settings-item-text"):
+                    yield Static(
+                        "Reply chime",
+                        classes="settings-item-name",
+                    )
+                    yield Static(
+                        "",
+                        id="settings-notify-desc",
+                        classes="settings-item-description",
+                    )
+                with Horizontal(classes="settings-switch-wrap"):
+                    yield ModeSwitch(
+                        "on"
+                        if getattr(self, "_notify_enabled", True)
+                        else "off",
+                        options=(("Off", "off"), ("On", "on")),
+                        id="notify-switch",
+                    )
+            yield Static(
+                "Tone and per-event switches live in "
+                "config/config.json → notify. Windows only.",
+                id="settings-notify-note",
+                classes="settings-pref-note",
+            )
+        with Vertical(classes="settings-card", id="settings-theme-card"):
+            with Horizontal(classes="settings-card-head"):
+                yield Static(
+                    "THEME",
+                    classes="settings-memory-label",
+                )
+                yield Static(
+                    "",
+                    id="settings-theme-spinner",
+                    classes="settings-theme-spinner",
+                )
+                yield Static(
+                    "interface",
+                    classes="settings-memory-count",
+                )
+            with Horizontal(classes="settings-pref-row"):
+                with Vertical(classes="settings-item-text"):
+                    yield Static(
+                        "Colour theme",
+                        classes="settings-item-name",
+                    )
+                    yield Static(
+                        "Pick a palette; the whole app recolours "
+                        "immediately. The same five as Ctrl+T cycles.",
+                        id="settings-theme-desc",
+                        classes="settings-item-description",
+                    )
+                with Horizontal(classes="settings-switch-wrap"):
+                    yield ThemeSwitch(
+                        self._theme,
+                        id="theme-switch",
+                    )
+            yield Static(
+                "Applies at once and is remembered in "
+                "data/tui.json for the next launch.",
+                id="settings-theme-note",
                 classes="settings-pref-note",
             )
 

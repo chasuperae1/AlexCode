@@ -72,15 +72,18 @@ def grab_clipboard_image(dest: Path) -> Path | None:
     """把剪贴板里的图片保存为 PNG；剪贴板没有图片时返回 None。
 
     剪贴板里如果是图片文件（资源管理器复制），直接返回该文件路径。
+    正常情况下走 Pillow；只有 Pillow 缺席或读失败时才交给 PowerShell 直接
+    调 Win32 剪贴板（opencode 在 Windows 上就是这么做的）。Pillow 明确说
+    “没有图片”时不重复起子进程，免得每次粘贴都白等一次 PowerShell 启动。
     """
     try:
         from PIL import ImageGrab
     except ImportError:
-        return None
+        return _grab_with_powershell(dest)
     try:
         data = ImageGrab.grabclipboard()
     except Exception:
-        return None
+        return _grab_with_powershell(dest)
     if isinstance(data, list):
         for item in data:
             path = Path(str(item))
@@ -93,8 +96,59 @@ def grab_clipboard_image(dest: Path) -> Path | None:
         dest.parent.mkdir(parents=True, exist_ok=True)
         data.save(dest, "PNG")
     except Exception:
-        return None
+        return _grab_with_powershell(dest)
     return dest
+
+
+# 剪贴板里只有位图（截图工具常见）时 Pillow 偶尔读不到，WinForms 这条最稳。
+_PS_GRAB = r"""
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$image = [System.Windows.Forms.Clipboard]::GetImage()
+if ($null -eq $image) { Write-Output 'none'; exit 0 }
+$image.Save($env:ALEX_CLIP_DEST, [System.Drawing.Imaging.ImageFormat]::Png)
+$image.Dispose()
+Write-Output 'ok'
+"""
+
+
+def _grab_with_powershell(dest: Path) -> Path | None:
+    import os
+    import subprocess
+
+    if os.name != "nt":
+        return None
+    root = os.environ.get("SystemRoot") or r"C:\Windows"
+    exe = (
+        Path(root) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+    )
+    if not exe.is_file():
+        return None
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        env = {**os.environ, "ALEX_CLIP_DEST": str(dest)}
+        proc = subprocess.run(
+            [
+                str(exe),
+                "-NoProfile",
+                "-NonInteractive",
+                "-STA",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                _PS_GRAB,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            env=env,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0 or "ok" not in (proc.stdout or ""):
+        return None
+    return dest if dest.is_file() and dest.stat().st_size > 0 else None
 
 
 def display_text(prompt: str, images: list[Path]) -> str:

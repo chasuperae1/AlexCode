@@ -4,13 +4,12 @@ from __future__ import annotations
 
 from textual.widgets import Static
 
-from alex.screens.picker import PickerScreen
 from alex.ui.state import _load_ui_state, _save_ui_state
-from alex.ui.themes import THEMES, next_theme, theme_label, theme_name
+from alex.ui.themes import THEMES, next_theme, theme_label
 
 
 class ChromeThemeMixin:
-    """主题切换与主题选择器。"""
+    """主题切换。"""
 
     def _on_theme_changed(self, theme) -> None:
         """Textual 应用完主题后再重渲染。
@@ -21,13 +20,26 @@ class ChromeThemeMixin:
         """
         context = getattr(self, "render_context", None)
         theme_id = getattr(theme, "name", "") or str(self.theme)
+        settings_open = bool(getattr(self, "_settings_open", False))
         if context is not None:
-            # 换过的主题渲染结果留在 LRU 里，切回去是零解析
-            context.set_theme(str(theme_id))
+            # 换过的主题渲染结果留在 LRU 里，切回去是零解析。
+            # 设置页盖住聊天区时不必让每个块各排一遍：关页会整体重建。
+            context.set_theme(str(theme_id), broadcast=not settings_open)
         if self._permission_pending:
-            # 重建会清空聊天区，把尚未回应的权限卡一起抹掉
+            # 重建会清空聊天区，把尚未回应的权限卡一起抹掉；改为原地换色
+            card = getattr(self, "_permission_card", None)
+            set_theme = getattr(card, "set_theme", None)
+            if set_theme is not None:
+                set_theme(self.current_theme)
+            return
+        if settings_open:
+            # 设置页盖住了聊天区：在这里重建用户根本看不见，
+            # 记一笔，等关页返回时一次性重建。
+            self._theme_rebuild_pending = True
             return
         self._render_history()
+        if getattr(self, "_subagent_view_open", False):
+            self._retheme_subagent_board()
 
     def action_cycle_theme(self) -> None:
         """Ctrl+T 按注册顺序循环切换五套主题。"""
@@ -52,20 +64,3 @@ class ChromeThemeMixin:
             self.query_one("#workspace-line", Static).update(self._workspace_line())
         except Exception:
             pass
-
-    def _open_theme_picker(self) -> None:
-        rows = [
-            (theme_label(name), name == self.theme) for name in THEMES
-        ]
-        self.push_screen(
-            PickerScreen(
-                "Choose theme",
-                rows,
-                "↑/↓ move · Enter apply · Esc cancel",
-            ),
-            self._on_theme_picked,
-        )
-
-    def _on_theme_picked(self, label: str | None) -> None:
-        if label:
-            self._set_theme(theme_name(label))

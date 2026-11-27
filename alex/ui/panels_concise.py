@@ -22,7 +22,7 @@ from alex.ui.timing import ensure_interval, stop_timer
 class ConciseSummary(Vertical):
     """简洁模式的一轮汇总卡。
 
-    头部只显示 steps / rules / 状态；Rules、Thinking、Shell、Diff 等细项默认
+    头部只显示 steps、计时与运行状态；Rules、Thinking、Shell、Diff 等细项默认
     收起，点击卡片或按 Enter / Space 展开。shell 只显示调用次数、耗时、
     输出行数与 exit code，不显示命令行和 stdout 正文。
     """
@@ -427,24 +427,24 @@ class ConciseSummary(Vertical):
             if self._activity:
                 bits.append(self._activity)
             meta = "· " + " · ".join(bits)
-            state_text = "running"
-            state_style = f"bold {theme.secondary}"
         elif self._state == "failed":
             meta = "· failed"
             if source_meta:
                 meta = f"· {source_meta} · failed"
-            state_text = "failed"
-            state_style = f"bold {theme.error}"
         else:
             bits = []
             if source_meta:
                 bits.append(source_meta)
             bits.append(format_duration(elapsed))
             meta = "· " + " · ".join(bits)
-            state_text = "done"
-            state_style = f"bold {theme.success}"
         self._meta.update(meta)
-        self._state_label.update(Text(state_text, style=state_style))
+        # 右侧状态只在运行中显示；结束时由标题和展开行表达结果
+        running = self._state == "running"
+        self._state_label.display = running
+        if running:
+            self._state_label.update(
+                Text("running", style=f"bold {theme.secondary}")
+            )
         body = self._body_text()
         has_body = bool(body.plain)
         self._body.display = has_body and not self._collapsed

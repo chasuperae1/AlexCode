@@ -36,6 +36,11 @@ class EventRouterMixin:
         "tool_label": "_on_tool_label",
         "tool_result": "_on_tool_result",
         "reply_end": "_on_reply_end",
+        # 子代理可见性
+        "subagent_start": "_on_subagent_start",
+        "subagent_delta": "_on_subagent_delta",
+        "subagent_tool": "_on_subagent_tool",
+        "subagent_end": "_on_subagent_end",
         # 确认与选择题
         "confirm_request": "_on_confirm_request",
         "confirm_end": "_on_confirm_end",
@@ -167,6 +172,10 @@ class EventRouterMixin:
         self._set_progress({"text": ""})
         self.view.begin_exchange(exchange_id, data.get("text", ""))
         self._append_block(USER, data.get("text", ""), exchange_id)
+        # 新的一轮开始：上一轮“已完成”的子代理标识立即收起；
+        # 如果本轮又派发子代理，会在 subagent_start 时重新出现。
+        self._subagent_done_at = None
+        self._refresh_task_status()
         if self._concise:
             self._begin_concise_summary()
 
@@ -251,6 +260,8 @@ class EventRouterMixin:
 
     # ---------------------------------------------------------------- 确认 / 选择题
     def _on_confirm_request(self, data: dict) -> None:
+        # 子代理的权限请求先归到它的注册表记录：主界面行与右下角入口同步变警告
+        self._subagent_permission_requested(data)
         # 权限等待独立成组：设置页/发送/刷新等默认组 worker 的 exclusive
         # 取消不能把正在等用户选择的卡片连带取消。
         self.run_worker(
@@ -261,6 +272,7 @@ class EventRouterMixin:
         # 另一个窗口先回应时，更新本窗口的内联卡，不再弹第二个确认层
         request_id = str(data.get("request_id", ""))
         choice = str(data.get("choice", ""))
+        self._subagent_permission_resolved(request_id)
         if request_id == self._confirm_request_id and self._permission_card is not None:
             self._confirm_resolved = True
             self._permission_card.resolve_external(choice)
@@ -300,6 +312,13 @@ class EventRouterMixin:
         # 历史被整体替换（撤销/清空/重连）：窗口回到最新，旧下标已失效。
         self._window_start = None
         self._window_end = None
+        self._subagents = {}
+        self._subagent_done_at = None
+        # 清空 / 撤销 / 重连：上一轮的实时摘要卡不能带进新历史，
+        # 否则会留下“64 steps · 3 rules · failed”这类残留。
+        self._concise_card = None
+        self._set_progress({"text": ""})
+        self._refresh_task_status()
         if "checkpoints" in data:
             self.view.set_checkpoints(data.get("checkpoints") or [])
             self._history_needs_checkpoints = False
@@ -356,6 +375,7 @@ class EventRouterMixin:
     def _on_queue(self, data: dict) -> None:
         index = int(data.get("index", 0))
         total = int(data.get("total", 0))
+        self._queue_pending = index < total
         label = f"Queue {index}/{total}" if total else ""
         self._append_block("queue", f"{label} · {data.get('subject', '')}")
         self._refresh_meta_line()
@@ -385,5 +405,6 @@ class EventRouterMixin:
         self._refresh_meta_line()
 
     def _on_queue_done(self, data: dict) -> None:
+        self._queue_pending = False
         self._append_block("queue_summary", str(data.get("text", "")))
         self._refresh_meta_line()

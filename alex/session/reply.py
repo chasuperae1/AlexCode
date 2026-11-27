@@ -407,8 +407,9 @@ class ReplyMixin:
         self._tool_started[event.tool_call_id] = time.monotonic()
         self._tool_args[event.tool_call_id] = ""
         self._tool_names[event.tool_call_id] = event.tool_call_name
-        # AskUser 由 ask_request / ask_end 单独呈现，不写调试记录
-        if event.tool_call_name != "AskUser":
+        # 子代理有自己的生命周期事件（subagent_start/delta/tool/end），
+        # 父会话不再为它生成一条通用工具行，避免出现重复记录。
+        if event.tool_call_name not in ("AskUser", "Subagent"):
             kind, label = self._tool_label(event.tool_call_name)
             # 历史只记一条完成结果，TUI 按行还原，避免开始/结果重复
             self.emit(
@@ -428,23 +429,12 @@ class ReplyMixin:
         )
         # 参数一拼完就记住文件原内容（此时工具尚未执行）
         self._capture_before_content(event.tool_call_id)
-        # 参数一完整就把任务名补到行上，不用等子代理跑完
+        # 子代理的任务名由 subagent_start 事件携带，通用工具行不再补标签
         if (
             self._tool_names.get(event.tool_call_id) == "Subagent"
             and event.tool_call_id not in self._tool_labels
         ):
-            task = self._tool_arg(event.tool_call_id, "description")
-            if task:
-                self._tool_labels[event.tool_call_id] = task
-                self.emit(
-                    "tool_label",
-                    {
-                        "id": event.tool_call_id,
-                        "name": "Subagent",
-                        "kind": "tool",
-                        "label": f"Subagent · {task}",
-                    },
-                )
+            return
 
     def _on_tool_result_start(self, event: Any, run: _ReplyRun) -> None:
         name = self._tool_names.get(event.tool_call_id, "Tool")
@@ -459,6 +449,10 @@ class ReplyMixin:
         name = self._tool_names.pop(event.tool_call_id, "Tool")
         self._tool_labels.pop(event.tool_call_id, None)
         if name == "AskUser":
+            return
+        # 子代理的完成状态由 subagent_end 记录，父会话不再追加通用结果行
+        if name == "Subagent":
+            self._refresh_tasks()
             return
         label = name
         skill = ""

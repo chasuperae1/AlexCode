@@ -11,6 +11,7 @@ from alex.config import reload_config
 from alex.daemon.client import LinkError
 from alex.screens.ask_choice import AskChoice
 from alex.screens.confirm import DENY
+from alex.sound import chime
 from alex.ui.constants import PROMPT_PLACEHOLDER
 from alex.ui.activity import SHELL_TOOLS
 from alex.ui.panels import ChatLog, CompactionStatus
@@ -56,6 +57,7 @@ class EventsMixin(EventRouterMixin, HistoryMixin):
         else:
             self._hide_loading()
         self.view.apply_snapshot(data)
+        self._load_subagents(data.get("subagents"))
         pending_ask = data.get("pending_ask")
         if not pending_ask:
             # 另一窗口已作答或请求已取消：快照重建前先丢掉本地旧问题
@@ -87,6 +89,7 @@ class EventsMixin(EventRouterMixin, HistoryMixin):
             self._live_runs.clear()
             self._refresh_task_status()
         self._set_activity(str(data.get("activity", "") or ""))
+        self._refresh_task_status()
         self.query_one("#prompt", PromptInput).disabled = phase not in {
             "idle",
             "failed",
@@ -165,6 +168,8 @@ class EventsMixin(EventRouterMixin, HistoryMixin):
             return
         self._ensure_latest_window()
         self._permission_payload = dict(payload)
+        # 需要点 accept 时提醒一次；同一请求重建卡片不重复响（上面已挡掉）
+        chime("permission")
         choice = None
         future = asyncio.get_running_loop().create_future()
         card_class = permission_card_class(str(payload.get("tool") or ""))
@@ -257,6 +262,8 @@ class EventsMixin(EventRouterMixin, HistoryMixin):
         if self._ask_widget is not None:
             self._ask_widget.mark_answer("Cancelled", skipped=True)
         self._ask_payload = dict(payload)
+        # 需要你答题时也提醒一次（上面已挡掉同一次请求的重挂）
+        chime("ask")
         self._ensure_concise_summary()
         widget = AskChoice(payload, self._answer_ask)
         self._ask_widget = widget
@@ -278,10 +285,12 @@ class EventsMixin(EventRouterMixin, HistoryMixin):
         skipped: bool,
     ) -> None:
         images: list[Path] = []
-        for token, path in self._pasted_images.items():
+        for token, path in self._ask_pasted_images.items():
             if token in other:
                 images.append(path)
                 other = other.replace(token, "")
+        # 答题卡只有一个自定义输入框：答完就把它的图片映射清掉
+        self._ask_pasted_images.clear()
         other = " ".join(other.split())
         self.run_worker(
             self._answer_ask_rpc(request_id, choices, other, skipped, images),
@@ -417,6 +426,9 @@ class EventsMixin(EventRouterMixin, HistoryMixin):
                 int(data.get("cache_tokens", 0) or 0),
                 bool(data.get("compacted")),
             )
+        # 本轮真正停下来才响：用户自己按停止的不提醒，队列里还有任务也不提醒
+        if not data.get("interrupted") and not self._queue_pending:
+            chime("reply_end")
         self._maybe_trim_window()
 
     async def on_unmount(self) -> None:
@@ -425,9 +437,12 @@ class EventsMixin(EventRouterMixin, HistoryMixin):
 
     def on_resize(self, event) -> None:
         """窄屏时压缩聊天区左右留白。"""
-        chat = self.query_one("#chat", ChatLog)
         pad = 1 if event.size.width < 80 else 2
-        chat.styles.padding = (1, pad, 0, pad)
+        for selector in ("#chat", "#subagents"):
+            try:
+                self.query_one(selector).styles.padding = (1, pad, 0, pad)
+            except Exception:
+                pass
 
 
     def _jump_to_latest(self) -> None:
@@ -446,3 +461,6 @@ class EventsMixin(EventRouterMixin, HistoryMixin):
             self._jump_to_latest()
         elif widget_id == "settings-link":
             self._open_settings()
+        elif widget_id == "task-status":
+            event.stop()
+            self.toggle_subagents()

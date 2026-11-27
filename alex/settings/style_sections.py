@@ -108,6 +108,19 @@ SETTINGS_SECTIONS_CSS = """
         background: $primary 12%;
         color: $foreground;
     }
+    SettingsScreen .settings-theme-switch {
+        height: 1;
+        padding: 0;
+    }
+    SettingsScreen .settings-theme-switch:focus {
+        background: $primary 12%;
+    }
+    SettingsScreen .settings-theme-segment {
+        height: 1;
+    }
+    SettingsScreen #settings-notify-card {
+        width: 1fr;
+    }
     SettingsScreen .settings-pref-note {
         height: auto;
         padding: 1 1 0 1;
@@ -228,6 +241,12 @@ SETTINGS_SECTIONS_CSS = """
     SettingsScreen .settings-card-head {
         height: auto;
         padding: 1 1 0 1;
+    }
+    SettingsScreen .settings-theme-spinner {
+        width: auto;
+        height: 1;
+        margin-right: 1;
+        color: $text-muted;
     }
     SettingsScreen .settings-card-head:hover {
         background: $primary 10%;

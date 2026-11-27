@@ -76,22 +76,32 @@ class InputSettingsMixin:
             ),
             on_visibility_change=self._set_agent_visibility,
             on_display_mode_change=self._set_display_mode,
+            theme=str(getattr(self, "theme", "")),
         )
         # 数据往往瞬间到手，保底展示一小段时间，让加载指示肉眼可见
         remain = 0.35 - (time.monotonic() - started)
         if remain > 0:
             await asyncio.sleep(remain)
         self._stop_settings_spinner()
-        changed = await self.push_screen_wait(screen)
+        self._settings_open = True
+        try:
+            changed = await self.push_screen_wait(screen)
+        finally:
+            self._settings_open = False
+        # 设置页开着时切过主题：聊天区被盖住，重建推迟到这里做一次
+        themed = bool(getattr(self, "_theme_rebuild_pending", False))
+        self._theme_rebuild_pending = False
+        # 改动类设置（主题变量 / 字号 / 技能可见性）会让缓存里的渲染结果失效
+        context = getattr(self, "render_context", None)
+        if changed and context is not None:
+            context.invalidate()
         # 没有改动时不重建聊天区。只开关设置页就全量重建，会把仅存在于
         # 当前界面的中间 assistant 文本、已作答 ask 行冲掉（history 里未必
         # 都有对应记录）。
-        if changed:
-            # 设置可能改了主题变量 / 字号：缓存里的渲染结果不再是同一份样式
-            context = getattr(self, "render_context", None)
-            if context is not None:
-                context.invalidate()
+        if changed or themed:
             self._render_history()
+            if themed and getattr(self, "_subagent_view_open", False):
+                self._retheme_subagent_board()
         elif self.view.thinking:
             # 不重建聊天区时，Textual 的 Collapsible 正文可能停留在弹层
             # 关闭前的一帧；主动把当前思考正文重绘一次。

@@ -11,7 +11,7 @@ from textual.widgets import Collapsible, Static
 from alex.core.snapshots import Checkpoint
 from alex.daemon.client import LinkError
 from alex.ui.constants import ASSISTANT, DEBUG_KINDS, USER
-from alex.ui.activity import SHELL_TOOLS
+from alex.ui.activity import SHELL_TOOLS, SubagentRow
 from alex.ui.chat_window import (
     PAGE_UNITS,
     TRIM_UNITS,
@@ -137,7 +137,7 @@ class HistoryMixin:
         # 重建会清空再重挂，滚动位置会被重置到顶部；先记住重建前的状态。
         # 正在跟随贴底的中间态也算“在底部”，否则连续两次重建（history_reset
         # 紧跟 checkpoints）会把视口定格在半途。
-        at_bottom = chat.is_vertical_scroll_end or chat._follow_timer is not None
+        at_bottom = chat.is_vertical_scroll_end or chat.is_following
         anchor = int(chat.scroll_y)
         # 正在翻旧窗口时，当前回合的实时卡/流式块不属于这个区间。
         # 尾部窗口的判定看“是否跟随最新”，不能只看 end：前插页的 end 也可能
@@ -225,6 +225,7 @@ class HistoryMixin:
         if getattr(self, "_permission_pending", False) and active is None:
             self._attach_permission_card()
         self._restore_chat_scroll(chat, at_bottom=at_bottom, anchor=anchor)
+        self._restore_subagent_notice()
 
     def action_history_earlier(self) -> None:
         self.load_earlier_history()
@@ -479,7 +480,8 @@ class HistoryMixin:
                 # 换页会把它们一起清掉，这种情况退回整屏重建，让这些控件按
                 # 原有逻辑重新挂回来。
                 self._render_history()
-                self.call_after_refresh(lambda: chat.scroll_end(animate=False))
+                chat.stop_follow()
+                self._settle_scroll(chat, to_end=True)
                 return
             self._reset_history_view()
             chat._suspend_scroll = True
@@ -497,7 +499,8 @@ class HistoryMixin:
                     return
                 if not pending:
                     chat._suspend_scroll = False
-                    chat.scroll_end(animate=False)
+                    # 落到这一页的**末尾**：页尾的下一屏正是读者刚才看的位置。
+                    self._settle_scroll(chat, to_end=True)
                     return
                 chunk = pending[: self.PAGE_CHUNK]
                 del pending[: self.PAGE_CHUNK]
@@ -560,7 +563,7 @@ class HistoryMixin:
 
 
     def load_newer_history(self) -> None:
-        """往后翻一页；追上尾部时回到跟随最新。"""
+        """往后翻一页，落到新页的**开头**，和上一页的末尾接上。"""
         if self._window_start is None:
             return
         history = self.view.history
@@ -579,9 +582,25 @@ class HistoryMixin:
         self._window_end = forward_end(history, start, PAGE_UNITS)
         self._render_history()
         chat = self.query_one("#chat", ChatLog)
-        # _render_history 可能把旧 scroll_y 的恢复排到下一帧；这里再排一次，
-        # 保证“往后翻”最终停在新区间顶部。
-        self.call_after_refresh(lambda: chat.scroll_home(animate=False))
+        # 重建时会按“原来在底部”重新贴底，贴底跟随又会每 100ms 把视口拽回
+        # 新页末尾——读者点“更晚”看到的就成了页底而不是页首。这里先停跟随，
+        # 再连续几帧把视口钉在新页顶部（高度要几帧才排完，只钉一次会停半截）。
+        chat.stop_follow()
+        self._settle_scroll(chat, to_end=False)
+
+    def _settle_scroll(self, chat: ChatLog, *, to_end: bool, frames: int = 4) -> None:
+        """连续几帧把视口钉到页首/页尾。
+
+        历史页是分帧挂上的：最后几块的高度要再等一两帧才定稿，这时
+        ``scroll_end`` 读到的是一个偏小的 ``max_scroll_y``，视口就停在半截，
+        看着像“从页首开始”。多钉几帧，等高度稳定后再落一次。
+        """
+        target = chat.scroll_end if to_end else chat.scroll_home
+        target(animate=False)
+        if frames > 1:
+            self.call_after_refresh(
+                lambda: self._settle_scroll(chat, to_end=to_end, frames=frames - 1)
+            )
 
     def _ensure_latest_window(self) -> None:
         """权限卡/选择题必须看得见：正在翻历史时先回到最新。"""
@@ -641,6 +660,7 @@ class HistoryMixin:
         self._thinking_static = None
         self._thinking_started = 0.0
         self._tool_rows = {}
+        self._reset_subagent_view()
 
     def _build_history(
         self,
@@ -673,6 +693,8 @@ class HistoryMixin:
                 self._history_changes_entry(build, content)
             elif kind == "verifier_text":
                 self._history_verifier_text_entry(build, content)
+            elif kind == "subagent":
+                self._history_subagent_entry(build, content)
             elif kind in DEBUG_KINDS:
                 self._history_debug_entry(build, kind, content)
             elif kind == USER:
@@ -691,6 +713,27 @@ class HistoryMixin:
                 else None
             )
             self._flush_pending(build, checkpoint)
+
+    def _history_subagent_entry(
+        self, build: _HistoryBuild, content: str
+    ) -> None:
+        """子代理内联行：重建（换主题/重连）后仍能点击进入子会话。"""
+        try:
+            data = json.loads(content)
+        except (TypeError, ValueError):
+            return
+        if not isinstance(data, dict):
+            return
+        subagent_id = str(data.get("id") or "")
+        record = self._subagents.get(subagent_id) if subagent_id else None
+        if subagent_id and record is None:
+            record = dict(data)
+            record.setdefault("transcript", [])
+            self._subagents[subagent_id] = record
+        row = SubagentRow(record or data, build.theme)
+        build.widgets.append(row)
+        if subagent_id:
+            self._subagent_rows[subagent_id] = row
 
     def _history_shell_card_entry(
         self, build: _HistoryBuild, content: str

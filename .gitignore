@@ -76,3 +76,7 @@ design/
 Thumbs.db
 desktop.ini
 *.swp
+
+assets/
+
+.gitignore

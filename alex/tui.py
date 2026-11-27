@@ -26,6 +26,7 @@ from alex.ui.app_events import EventsMixin
 from alex.ui.app_input import InputMixin
 from alex.ui.app_startup import StartupMixin
 from alex.ui.app_style import APP_CSS
+from alex.ui.app_subagents import SubagentMixin
 from alex.ui.boot import LoadingOverlay
 from alex.ui.constants import ASSISTANT, PROMPT_PLACEHOLDER, USER  # noqa: F401
 from alex.ui.panels import ChatLog, GoalCard, QueueCard
@@ -52,7 +53,15 @@ from alex.ui.widgets import (  # noqa: F401
 )
 
 
-class AlexApp(StartupMixin, EventsMixin, ChatMixin, ChromeMixin, InputMixin, TermUIApp):
+class AlexApp(
+    StartupMixin,
+    EventsMixin,
+    ChatMixin,
+    SubagentMixin,
+    ChromeMixin,
+    InputMixin,
+    TermUIApp,
+):
     """Alex 对话界面。"""
 
     TITLE = "Alex"
@@ -70,7 +79,6 @@ class AlexApp(StartupMixin, EventsMixin, ChatMixin, ChromeMixin, InputMixin, Ter
         ("/queue", "Split the request into tasks, run them in order"),
         ("/goal", "Run until the goal passes verification"),
         ("/clear", "Clear the session"),
-        ("/theme", "Choose the theme"),
         ("/help", "Show help"),
         ("/exit", "Quit Alex"),
     ]
@@ -105,6 +113,7 @@ class AlexApp(StartupMixin, EventsMixin, ChatMixin, ChromeMixin, InputMixin, Ter
     def __init__(self) -> None:
         super().__init__()
         self._init_stream_state()
+        self._init_subagents()
         self._init_runtime_state()
         self._init_interaction_state()
         self._init_queue_goal_state()
@@ -195,17 +204,22 @@ class AlexApp(StartupMixin, EventsMixin, ChatMixin, ChromeMixin, InputMixin, Ter
         self._activity_before_stop = ""
         self._stopping = False
 
-        # 粘贴的截图：占位符 -> 本地文件
+        # 粘贴的截图：占位符 -> 本地文件（主输入框 / 答题卡自定义输入分开存，
+        # 两边的 image-1 互不覆盖）
         self._pasted_images: dict[str, Path] = {}
-        self._paste_seq = 0
+        self._ask_pasted_images: dict[str, Path] = {}
 
     def _init_queue_goal_state(self) -> None:
         self._queue_confirming = False
         self._queue_armed = False
         self._queue_total = 0
+        # 队列里还有没跑完的任务：此时 AI 不是“停下来”，不响提示音
+        self._queue_pending = False
         self._queue_card_widget: QueueCard | None = None
         self._goal_card_widget: GoalCard | None = None
         self._goal_confirming = False
+        # 目标卡已经切到“等你确认”状态，避免重复响
+        self._goal_needs_you = False
         self._goal_editing = False
         self._goal_phase = ""
         self._verifier_mode = False
@@ -234,6 +248,9 @@ class AlexApp(StartupMixin, EventsMixin, ChatMixin, ChromeMixin, InputMixin, Ter
         self._model_catalog: dict[str, dict] = {}
         self._settings_spinner_frame = 0
         self._settings_spinner_timer = None
+        # 设置页是否正盖在聊天区上：主题重建要等关页再做，省掉看不见的重建
+        self._settings_open = False
+        self._theme_rebuild_pending = False
 
 
     # ------------------------------------------------------------------ 布局
@@ -245,6 +262,8 @@ class AlexApp(StartupMixin, EventsMixin, ChatMixin, ChromeMixin, InputMixin, Ter
                 yield Static("", id="settings-spinner")
                 yield Static("Settings", id="settings-link", classes="source-link")
             yield ChatLog(id="chat")
+            # 子代理列表与聊天区共用这块交互区，列表打开时聊天区让位
+            yield Vertical(id="subagents")
             with Vertical(id="bottom"):
                 yield OptionList(id="commands")
                 with Horizontal(id="bottom-toolbar"):

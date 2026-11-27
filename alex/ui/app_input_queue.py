@@ -80,6 +80,9 @@ class InputQueueMixin:
         if isinstance(self.screen, DirectoryPicker):
             self.screen.dismiss(None)
             return
+        if self._subagent_view_open:
+            self.close_subagents()
+            return
         if self._permission_pending and self._permission_card is not None:
             # 权限卡继承 ToolDiffCard，Esc 必须先 Deny，而不是折叠卡片
             self._permission_card.action_deny()

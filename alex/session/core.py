@@ -110,6 +110,8 @@ class CoreMixin(BootMixin):
         self._before_content: dict[str, tuple[str, str]] = {}
         self._tool_labels: dict[str, str] = {}
         self._tool_names: dict[str, str] = {}
+        # 子代理运行态：id -> 记录；事件/快照据此还原可见性面板
+        self._subagents: dict[str, dict[str, Any]] = {}
         self._snapshot_warned = False
         self._last_tree: str | None = None
         self._delta_buffer: dict[str, str] = {}
@@ -310,6 +312,7 @@ class CoreMixin(BootMixin):
             "pending_confirm": self._pending_confirm,
             "pending_ask": self._pending_ask,
             "tasks": self._tasks_payload(),
+            "subagents": self._subagents_payload(),
             "progress": dict(self._progress_state),
             "goal_phase": (self._goal_state or {}).get("phase", ""),
             "goal_confirmation": {
@@ -381,6 +384,222 @@ class CoreMixin(BootMixin):
     ) -> dict[str, Any]:
         """RPC：翻到 ``before`` 之前的一页历史；TUI 向上翻过已加载窗口时调用。"""
         return self._history_page(before, limit)
+
+    def _subagent_entry(self, record: dict[str, Any]) -> dict[str, Any]:
+        """历史/快照里的子代理摘要；正文与逐条记录留在内存里。"""
+        return {
+            "id": str(record.get("id") or ""),
+            "label": str(record.get("label") or "Subagent"),
+            "description": str(record.get("description") or ""),
+            "model": str(record.get("model") or ""),
+            "status": str(record.get("status") or "running"),
+            "elapsed": float(record.get("elapsed") or 0.0),
+            "steps": int(record.get("steps") or 0),
+            "started_at": float(record.get("started_at") or 0.0),
+            "waiting": bool(record.get("waiting")),
+            "waiting_tool": str(record.get("waiting_tool") or ""),
+            "result": str(record.get("result") or "")[:2000],
+            "error": str(record.get("error") or "")[:1000],
+        }
+
+    def _subagents_payload(self) -> list[dict[str, Any]]:
+        payload: list[dict[str, Any]] = []
+        for record in self._subagents.values():
+            item = self._subagent_entry(record)
+            transcript = record.get("transcript") or []
+            item["transcript"] = [dict(entry) for entry in transcript[-200:]]
+            item["prompt"] = str(record.get("prompt") or "")[:2000]
+            item["text"] = str(record.get("text") or "")[:8000]
+            payload.append(item)
+        return payload
+
+    def _save_subagent_entry(self, subagent_id: str, entry: dict[str, Any]) -> None:
+        """把子代理的最新状态写回它那条历史记录（按 id 原地更新）。"""
+        for index in range(len(self.history) - 1, -1, -1):
+            kind, raw = self.history[index]
+            if kind != "subagent":
+                continue
+            try:
+                candidate = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            if str(candidate.get("id") or "") != subagent_id:
+                continue
+            self.history[index] = (
+                "subagent",
+                json.dumps(entry, ensure_ascii=False),
+            )
+            return
+        self.history.append(
+            ("subagent", json.dumps(entry, ensure_ascii=False))
+        )
+
+    def _append_subagent_transcript(
+        self, record: dict[str, Any], item: dict[str, Any]
+    ) -> None:
+        transcript = record.setdefault("transcript", [])
+        # 连续正文/思考合并成一段，快照里不会留下成百上千条小碎片
+        if (
+            item.get("kind") in {"text", "think"}
+            and transcript
+            and transcript[-1].get("kind") == item.get("kind")
+        ):
+            transcript[-1]["delta"] = (
+                str(transcript[-1].get("delta") or "")
+                + str(item.get("delta") or "")
+            )
+        else:
+            transcript.append(dict(item))
+        if len(transcript) > 400:
+            del transcript[:100]
+
+    def _on_subagent_event(self, kind: str, data: dict[str, Any]) -> None:
+        """接收子代理生命周期/流式事件：维护注册表、历史并广播给界面。"""
+        subagent_id = str(data.get("id") or "")
+        if not subagent_id:
+            return
+        record = self._subagents.get(subagent_id)
+        if kind == "subagent_start":
+            record = {
+                "id": subagent_id,
+                "label": str(data.get("label") or "Subagent"),
+                "description": str(data.get("description") or ""),
+                "model": str(data.get("model") or ""),
+                "prompt": str(data.get("prompt") or ""),
+                "started_at": float(data.get("started_at") or 0.0),
+                "status": "running",
+                "elapsed": 0.0,
+                "steps": 0,
+                "text": "",
+                "thinking": "",
+                "transcript": [],
+                "waiting": False,
+                "waiting_tool": "",
+                "result": "",
+                "error": "",
+            }
+            self._subagents[subagent_id] = record
+            entry = self._subagent_entry(record)
+            self.history.append(
+                ("subagent", json.dumps(entry, ensure_ascii=False))
+            )
+            self._save_history()
+            self.emit(kind, {**data, **record_payload("subagent", entry)})
+            return
+        if record is None:
+            record = self._subagents[subagent_id] = {
+                "id": subagent_id,
+                "label": str(data.get("label") or "Subagent"),
+                "description": "",
+                "model": "",
+                "started_at": 0.0,
+                "status": "running",
+                "elapsed": 0.0,
+                "steps": 0,
+                "text": "",
+                "thinking": "",
+                "transcript": [],
+                "waiting": False,
+                "waiting_tool": "",
+                "result": "",
+                "error": "",
+            }
+        if kind == "subagent_delta":
+            channel = str(data.get("channel") or "text")
+            delta = str(data.get("delta") or "")
+            if channel == "thinking":
+                record["thinking"] = str(record.get("thinking") or "") + delta
+                self._append_subagent_transcript(
+                    record, {"kind": "think", "delta": delta}
+                )
+            else:
+                record["text"] = str(record.get("text") or "") + delta
+                self._append_subagent_transcript(
+                    record, {"kind": "text", "delta": delta}
+                )
+            self.emit(kind, data)
+            return
+        if kind == "subagent_tool":
+            if str(data.get("phase") or "") == "start":
+                record["steps"] = int(record.get("steps") or 0) + 1
+            self._append_subagent_transcript(
+                record,
+                {
+                    "kind": "tool",
+                    "call_id": str(data.get("call_id") or ""),
+                    "name": str(data.get("name") or "Tool"),
+                    "phase": str(data.get("phase") or ""),
+                    "state": str(data.get("state") or ""),
+                    "elapsed": float(data.get("elapsed") or 0.0),
+                },
+            )
+            self.emit(kind, data)
+            return
+        if kind == "subagent_end":
+            state = str(data.get("state") or "completed")
+            record.update(
+                {
+                    "status": state,
+                    "elapsed": float(
+                        data.get("seconds") or record.get("elapsed") or 0.0
+                    ),
+                    "steps": int(
+                        data.get("steps") or record.get("steps") or 0
+                    ),
+                    "waiting": False,
+                    "waiting_tool": "",
+                    "result": str(data.get("result") or ""),
+                    "error": str(data.get("error") or ""),
+                }
+            )
+            self._append_subagent_transcript(
+                record,
+                {
+                    "kind": "end",
+                    "status": state,
+                    "seconds": float(data.get("seconds") or 0.0),
+                    "steps": int(data.get("steps") or 0),
+                    "error": str(data.get("error") or ""),
+                },
+            )
+            entry = self._subagent_entry(record)
+            self._save_subagent_entry(subagent_id, entry)
+            self._save_history()
+            self.emit(kind, {**data, **record_payload("subagent", entry)})
+
+    def mark_subagent_waiting(
+        self,
+        subagent_id: str,
+        label: str,
+        waiting: bool,
+        tool: str = "",
+    ) -> None:
+        """子代理请求权限 / 权限已处理：把等待状态写进注册表与历史。"""
+        if not subagent_id:
+            return
+        record = self._subagents.get(subagent_id)
+        if record is None:
+            record = self._subagents[subagent_id] = {
+                "id": subagent_id,
+                "label": label or "Subagent",
+                "description": "",
+                "model": "",
+                "started_at": 0.0,
+                "status": "running",
+                "elapsed": 0.0,
+                "steps": 0,
+                "text": "",
+                "thinking": "",
+                "transcript": [],
+                "waiting": False,
+                "waiting_tool": "",
+                "result": "",
+                "error": "",
+            }
+        record["waiting"] = bool(waiting)
+        record["waiting_tool"] = str(tool or "") if waiting else ""
+        self._save_subagent_entry(subagent_id, self._subagent_entry(record))
+        self._save_history()
 
     def _tasks_payload(self) -> dict[str, Any]:
         if self.agent is None:
@@ -485,7 +704,8 @@ class CoreMixin(BootMixin):
         self._backend = backend
         self.agent, self.toolkit, _ = await build_agent(
             model, backend, self.mcps, gate=self._permission_gate, ask=self._ask_user,
-            on_compacting=self._notify_compacting
+            on_compacting=self._notify_compacting,
+            on_subagent_event=self._on_subagent_event,
         )
 
     async def rebuild_agent(self) -> dict[str, Any]:

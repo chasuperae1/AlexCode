@@ -364,9 +364,12 @@ class ShellPermissionCard(PermissionChoiceMixin, Vertical):
         text = Text()
         state = self._state
         if state == "pending":
+            who = str(
+                self._payload.get("subagent_label") or self._agent_name
+            )
             text.append("Permission required", style=f"bold {self._theme.warning}")
             text.append(
-                f" · {self._agent_name} · {self.tool_name} · mode default",
+                f" · {who} · {self.tool_name} · mode default",
                 style=self._theme.secondary,
             )
         elif state == "allowed":

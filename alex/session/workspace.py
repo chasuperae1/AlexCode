@@ -46,7 +46,8 @@ class WorkspaceMixin:
         self.mcps = await build_mcps()
         self.agent, self.toolkit, _ = await build_agent(
             model, backend, self.mcps, gate=self._permission_gate, ask=self._ask_user,
-            on_compacting=self._notify_compacting
+            on_compacting=self._notify_compacting,
+            on_subagent_event=self._on_subagent_event,
         )
         await self._update_meta()
         return {"mcp_servers": len(self.mcps), "model": CONFIG["model"]["name"]}
@@ -82,7 +83,8 @@ class WorkspaceMixin:
             self._backend = backend
             self.agent, self.toolkit, _ = await build_agent(
                 model, backend, self.mcps, gate=self._permission_gate, ask=self._ask_user,
-            on_compacting=self._notify_compacting
+            on_compacting=self._notify_compacting,
+            on_subagent_event=self._on_subagent_event,
             )
             store = SnapshotStore(target)
             self._snapshots = store
@@ -185,7 +187,8 @@ class WorkspaceMixin:
         self._backend = backend
         self.agent, self.toolkit, _ = await build_agent(
             model, backend, self.mcps, gate=self._permission_gate, ask=self._ask_user,
-            on_compacting=self._notify_compacting
+            on_compacting=self._notify_compacting,
+            on_subagent_event=self._on_subagent_event,
         )
         await self._update_meta()
         return {"model": name, "changed": True, "reasoning": level}

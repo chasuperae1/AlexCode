@@ -58,11 +58,15 @@ class ToolsMixin:
 
     async def _confirm_tool(self, agent_name, tool, tool_input, decision):
         from alex.core.permissions import ConfirmChoice, permission_detail
+        from alex.core.subagents import current_subagent
 
         # 并行子代理可能同时请求确认：排队逐个处理，避免互相覆盖
         async with self._confirm_lock:
             if self._stopping:
                 return ConfirmChoice.DENY
+            subagent = current_subagent() or {}
+            subagent_id = str(subagent.get("id") or "")
+            subagent_label = str(subagent.get("label") or "")
             try:
                 from alex.screens.diff import tool_diff
 
@@ -80,6 +84,8 @@ class ToolsMixin:
             payload = {
                 "request_id": request_id,
                 "agent": agent_name,
+                "subagent_id": subagent_id,
+                "subagent_label": subagent_label,
                 "tool": tool.name,
                 "detail": permission_detail(tool.name, tool_input),
                 "reason": decision.decision_reason or "",
@@ -93,6 +99,10 @@ class ToolsMixin:
             self._pending_future = asyncio.get_running_loop().create_future()
             self._phase = "waiting_confirm"
             self._set_activity("Waiting for approval…")
+            if subagent_id:
+                self.mark_subagent_waiting(
+                    subagent_id, subagent_label, True, tool.name
+                )
             self.emit("confirm_request", payload)
             try:
                 choice = await self._pending_future
@@ -103,6 +113,10 @@ class ToolsMixin:
                 self._pending_future = None
                 self._phase = "running" if self._busy else "idle"
                 self._set_activity("")
+                if subagent_id:
+                    self.mark_subagent_waiting(
+                        subagent_id, subagent_label, False
+                    )
             return choice
 
     def _record_shell_card(self, payload: dict[str, Any], state: str) -> None:
@@ -114,6 +128,8 @@ class ToolsMixin:
             for key in (
                 "request_id",
                 "agent",
+                "subagent_id",
+                "subagent_label",
                 "tool",
                 "command",
                 "cwd",
@@ -172,6 +188,8 @@ class ToolsMixin:
                 for key in (
                     "request_id",
                     "agent",
+                    "subagent_id",
+                    "subagent_label",
                     "tool",
                     "command",
                     "cwd",
@@ -428,6 +446,13 @@ class ToolsMixin:
         if images:
             return f"Attached {count} image{'s' if count != 1 else ''}"
         return "Skipped"
+
+    async def stop_subagent(self, subagent_id: str = "") -> dict[str, Any]:
+        """停掉一个正在跑的子代理；同轮其它子代理与主对话不受影响。"""
+        from alex.core.subagents import cancel_subagent
+
+        stopped = cancel_subagent(subagent_id)
+        return {"stopped": stopped, "id": str(subagent_id or "")}
 
     async def interrupt(self) -> None:
         """停止当前回复。"""
