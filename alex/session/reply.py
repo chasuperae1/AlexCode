@@ -236,13 +236,16 @@ class ReplyMixin:
         summary_now = getattr(self.agent.state, "summary", None)
         if summary_now == run.summary_before:
             return
+        summary_text = str(summary_now or "")
         run.summary_before = summary_now
         run.compacted = True
-        # 压缩前的用量取本轮开始后的最近一次统计（顶栏当时显示的值），
-        # 压缩本身是框架内部行为，事后再补算压缩后的用量。这里必须等
-        # 补算完再继续，否则卡片会掉到回答后面去。
-        before = run.tokens_before or self._usage_tokens
-        await self._record_compaction_async(str(summary_now or ""), before)
+        # 优先用压缩中间件在真正压缩前后量到的精确数字（它已经落卡）。
+        # 只有中间件不可用时才退回“本轮最近一次采样”，并显式标 est.；
+        # 绝不能把回复开始时的旧快照当成后面某次压缩的真实触发值。
+        if summary_text in self._recorded_compactions:
+            return
+        before = run.tokens_before or self._usage_tokens or None
+        await self._record_compaction_async(summary_text, before, estimated=True)
 
     def _report_failure(self, exc: Exception, images: list[Path], run: _ReplyRun) -> None:
         self._notice(
@@ -348,7 +351,9 @@ class ReplyMixin:
             },
         )
         self._refresh_tasks()
-        asyncio.create_task(self._update_meta())
+        # 收尾刷新也走统一调度器：关闭时会跟着 _meta_task 一起取消并等待，
+        # 不再单独 create_task 留下一个脱离生命周期管理的统计协程。
+        self._refresh_meta_soon()
         if run.before and run.store is not None:
             # 检查点必须在本轮边界内记完再放行。它是唯一在本轮之外追加
             # changes 记录的地方：留在后台跑，下一轮一起步就会把上一轮的

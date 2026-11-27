@@ -72,6 +72,12 @@ class CoreMixin(BootMixin):
         self._usage_tokens = 0
         self._meta_task: asyncio.Task | None = None
         self._meta_dirty = False
+        # 统计代际与暂停闸：重载/切模型/关闭时递增，旧采样回来直接丢弃；
+        # _meta_halt 保证取消中的刷新循环不会因 finally 再次启动。
+        self._stats_epoch = 0
+        self._meta_halt = False
+        # 已经由压缩中间件落过卡的摘要，避免 reply 侧再补一张重复卡。
+        self._recorded_compactions: list[str] = []
         # 上一次广播出去的 (label, workspace)，用于吞掉重复的 meta 事件
         self._meta_last: tuple[str, str] | None = None
         self._reply_task: asyncio.Task | None = None
@@ -276,6 +282,9 @@ class CoreMixin(BootMixin):
         if self._closed:
             return
         self._closed = True
+        # 先停统计：取消后仍要 await 它退出，清 dirty 并关暂停闸，
+        # 防止 finally 在关闭后又拉起一个刷新协程。
+        await self._stop_meta_refresh()
         await self._stop_queue_task()
         if self._reply_task is not None and not self._reply_task.done():
             await self._cancel_task(self._reply_task)
@@ -704,23 +713,37 @@ class CoreMixin(BootMixin):
         from alex.core.agent import build_agent, build_model
         from alex.core.tools import TrackedLocalBackend
 
-        model = build_model()
-        self._model = model
-        backend = TrackedLocalBackend(workdir=str(workspace_path(create=True)))
-        self._backend = backend
-        self.agent, self.toolkit, _ = await build_agent(
-            model, backend, self.mcps, gate=self._permission_gate, ask=self._ask_user,
-            on_compacting=self._notify_compacting,
-            on_subagent_event=self._on_subagent_event,
-        )
+        # 先把旧统计任务停干净再换 agent：旧采样既不能继续跑，也不能在
+        # finally 里复活。成功、失败、取消都由 finally 恢复暂停闸。
+        await self._stop_meta_refresh()
+        self._stats_epoch += 1
+        try:
+            model = build_model()
+            self._model = model
+            backend = TrackedLocalBackend(workdir=str(workspace_path(create=True)))
+            self._backend = backend
+            self.agent, self.toolkit, _ = await build_agent(
+                model, backend, self.mcps, gate=self._permission_gate, ask=self._ask_user,
+                on_compacting=self._notify_compacting,
+                on_compacted=self._on_compacted,
+                on_subagent_event=self._on_subagent_event,
+            )
+        finally:
+            self._resume_meta_refresh()
 
     async def rebuild_agent(self) -> dict[str, Any]:
         """按最新配置重建 agent（技能/规则开关），不重启 MCP。"""
         if self._turn_open():
             raise SessionError("busy", "a reply is still running")
         reload_config()
-        await self._rebuild_agent()
-        await self._update_meta()
+        try:
+            await self._rebuild_agent()
+            await self._update_meta()
+        except BaseException:
+            # 重建失败/取消时旧任务已在 _rebuild_agent 里停掉，重新开放
+            # 统计闸并让当前仍存活的 agent 重新采样一次。
+            self._refresh_meta_soon()
+            raise
         return {"model": CONFIG["model"]["name"]}
 
     def _set_busy(self, busy: bool) -> None:

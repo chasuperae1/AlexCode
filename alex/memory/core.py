@@ -29,6 +29,9 @@ class CoreMixin:
         max_memory_chars: int = 8000,
         retention_days: int = 30,
         on_compacting: Callable[[bool], Awaitable[None]] | None = None,
+        on_compacted: (
+            Callable[[str, int | None, int | None], Awaitable[None]] | None
+        ) = None,
     ) -> None:
         self._workdir = str(workdir)
         self._memory_dir = memory_dir
@@ -45,6 +48,7 @@ class CoreMixin:
         self._reflection_task: asyncio.Task | None = None
         self._reflection_lock = asyncio.Lock()
         self._on_compacting = on_compacting
+        self._on_compacted = on_compacted
 
     async def on_reply(
         self,
@@ -78,6 +82,11 @@ class CoreMixin:
     ) -> None:
         await self._safe_flush(agent, "before compaction")
         before = agent.state.summary
+        # 真正的压缩发生在 next_handler 里；这里在它之前按同一份
+        # _prepare_model_input 量一次，才能给 UI 一个可靠的“压缩前”边界。
+        before_tokens: int | None = None
+        if self._on_compacted is not None:
+            before_tokens = await self._measure_context_tokens(agent)
         # 框架每轮推理前都会调用这个钩子，真正压缩时会长时间无事件。
         # 延迟 0.4s 再对外提示，未压缩则直接取消，避免每轮闪一下。
         announced = False
@@ -101,6 +110,27 @@ class CoreMixin:
         # 只有真正压缩出新摘要时才反思，截断兜底不触发
         if agent.state.summary != before:
             self._schedule_reflection(agent)
+            if self._on_compacted is not None:
+                after_tokens = await self._measure_context_tokens(agent)
+                try:
+                    await self._on_compacted(
+                        str(agent.state.summary or ""),
+                        before_tokens,
+                        after_tokens,
+                    )
+                except Exception:  # 统计回调失败不能影响压缩结果
+                    logger.warning("Compaction sample callback failed", exc_info=True)
+
+    async def _measure_context_tokens(self, agent: Agent) -> int | None:
+        """按框架压缩判定同一口径计数；不可用时返回 None，不冒充 0。"""
+        try:
+            prepare = getattr(agent, "_prepare_model_input", None)
+            if prepare is None:
+                return None
+            kwargs = await prepare()
+            return int(await agent.model.count_tokens(**kwargs))
+        except Exception:
+            return None
 
     async def _notify_compacting(self, active: bool) -> None:
         """压缩状态提示失败不能影响压缩本身。"""

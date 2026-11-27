@@ -321,6 +321,9 @@ async def build_agent(
     gate: PermissionGate | None = None,
     ask: AskCallback | None = None,
     on_compacting: Callable[[bool], Awaitable[None]] | None = None,
+    on_compacted: (
+        Callable[[str, int | None, int | None], Awaitable[None]] | None
+    ) = None,
     on_subagent_event: Callable[[str, dict], None] | None = None,
 ) -> tuple[Agent, Toolkit, bool]:
     state, restored = load_state()
@@ -378,6 +381,7 @@ async def build_agent(
                 max_memory_chars=CONFIG.get("memory_max_chars", 8000),
                 retention_days=CONFIG.get("memory_retention_days", 30),
                 on_compacting=on_compacting,
+                on_compacted=on_compacted,
             ),
         )
 

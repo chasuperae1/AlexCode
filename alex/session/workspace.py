@@ -35,22 +35,34 @@ class WorkspaceMixin:
         from alex.core.agent import build_agent, build_mcps, build_model
         from alex.core.tools import TrackedLocalBackend
 
-        reload_config()
-        for client in self.mcps:
-            if client.is_stateful and client.is_connected:
-                await client.close()
-        model = build_model()
-        self._model = model
-        backend = TrackedLocalBackend(workdir=str(workspace_path(create=True)))
-        self._backend = backend
-        self.mcps = await build_mcps()
-        self.agent, self.toolkit, _ = await build_agent(
-            model, backend, self.mcps, gate=self._permission_gate, ask=self._ask_user,
-            on_compacting=self._notify_compacting,
-            on_subagent_event=self._on_subagent_event,
-        )
-        await self._update_meta()
-        return {"mcp_servers": len(self.mcps), "model": CONFIG["model"]["name"]}
+        await self._stop_meta_refresh()
+        self._stats_epoch += 1
+        refreshed = False
+        try:
+            reload_config()
+            for client in self.mcps:
+                if client.is_stateful and client.is_connected:
+                    await client.close()
+            model = build_model()
+            self._model = model
+            backend = TrackedLocalBackend(workdir=str(workspace_path(create=True)))
+            self._backend = backend
+            self.mcps = await build_mcps()
+            self.agent, self.toolkit, _ = await build_agent(
+                model, backend, self.mcps, gate=self._permission_gate, ask=self._ask_user,
+                on_compacting=self._notify_compacting,
+                on_compacted=self._on_compacted,
+                on_subagent_event=self._on_subagent_event,
+            )
+            await self._update_meta()
+            refreshed = True
+            return {"mcp_servers": len(self.mcps), "model": CONFIG["model"]["name"]}
+        finally:
+            self._resume_meta_refresh()
+            if not refreshed:
+                # 失败/取消后旧任务已停，允许新代际重新采样；成功则由上面的
+                # _update_meta 发布一次即可。
+                self._refresh_meta_soon()
 
     async def change_workspace(self, raw: str) -> dict[str, Any]:
         if self._revert is not None:
@@ -75,6 +87,9 @@ class WorkspaceMixin:
             raise SessionError("internal", f"Cannot use workspace: {exc}") from exc
         CONFIG["workdir"] = str(target)
         save_config()
+        await self._stop_meta_refresh()
+        self._stats_epoch += 1
+        refreshed = False
         try:
             save_state(self.agent.state)
             model = build_model()
@@ -83,8 +98,9 @@ class WorkspaceMixin:
             self._backend = backend
             self.agent, self.toolkit, _ = await build_agent(
                 model, backend, self.mcps, gate=self._permission_gate, ask=self._ask_user,
-            on_compacting=self._notify_compacting,
-            on_subagent_event=self._on_subagent_event,
+                on_compacting=self._notify_compacting,
+                on_compacted=self._on_compacted,
+                on_subagent_event=self._on_subagent_event,
             )
             store = SnapshotStore(target)
             self._snapshots = store
@@ -92,11 +108,16 @@ class WorkspaceMixin:
             self._checkpoints = list(store.checkpoints)
             self.emit("checkpoints", {"checkpoints": [asdict(i) for i in self._checkpoints]})
             await self._update_meta()
+            refreshed = True
             return {"workspace": str(target)}
         except Exception as exc:
             CONFIG["workdir"] = old
             save_config()
             raise SessionError("internal", f"Workspace switch failed: {exc}") from exc
+        finally:
+            self._resume_meta_refresh()
+            if not refreshed:
+                self._refresh_meta_soon()
 
     async def clear_memory(self) -> None:
         from alex.memory import clear_memory, find_memory_middleware
@@ -182,16 +203,26 @@ class WorkspaceMixin:
             CONFIG["model"]["reasoning"] = setting
             CONFIG.setdefault("reasoning_choices", {})[name] = level
         save_config()
-        model = build_model()
-        backend = TrackedLocalBackend(workdir=str(workspace_path(create=True)))
-        self._backend = backend
-        self.agent, self.toolkit, _ = await build_agent(
-            model, backend, self.mcps, gate=self._permission_gate, ask=self._ask_user,
-            on_compacting=self._notify_compacting,
-            on_subagent_event=self._on_subagent_event,
-        )
-        await self._update_meta()
-        return {"model": name, "changed": True, "reasoning": level}
+        await self._stop_meta_refresh()
+        self._stats_epoch += 1
+        refreshed = False
+        try:
+            model = build_model()
+            backend = TrackedLocalBackend(workdir=str(workspace_path(create=True)))
+            self._backend = backend
+            self.agent, self.toolkit, _ = await build_agent(
+                model, backend, self.mcps, gate=self._permission_gate, ask=self._ask_user,
+                on_compacting=self._notify_compacting,
+                on_compacted=self._on_compacted,
+                on_subagent_event=self._on_subagent_event,
+            )
+            await self._update_meta()
+            refreshed = True
+            return {"model": name, "changed": True, "reasoning": level}
+        finally:
+            self._resume_meta_refresh()
+            if not refreshed:
+                self._refresh_meta_soon()
 
     def set_visibility(self, kind: str, item: str, visible: bool) -> None:
         if kind == "skill":

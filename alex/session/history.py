@@ -36,21 +36,30 @@ class HistoryMixin:
     # 摘要）时没有工具事件，只靠钩子会漏，忙碌时每秒补量一次。
     META_TICK = 1.0
 
-    async def _tool_schemas(self) -> list[dict[str, Any]]:
+    async def _tool_schemas(
+        self, agent: Any | None = None, toolkit: Any | None = None
+    ) -> list[dict[str, Any]]:
         """当前激活分组下的工具 schema，与模型调用时的集合一致。"""
-        context = getattr(self.agent.state, "tool_context", None)
+        agent = self.agent if agent is None else agent
+        toolkit = self.toolkit if toolkit is None else toolkit
+        if agent is None or toolkit is None:
+            return []
+        context = getattr(agent.state, "tool_context", None)
         groups = getattr(context, "activated_groups", None) or []
-        return await self.toolkit.get_tool_schemas(groups)
+        return await toolkit.get_tool_schemas(groups)
 
-    async def _context_input(self) -> dict[str, Any]:
+    async def _context_input(
+        self, agent: Any | None = None, toolkit: Any | None = None
+    ) -> dict[str, Any]:
         """本轮真正送给模型的输入：system prompt + summary + 对话 + 工具。
 
         压缩阈值就是拿这一份算的（AgentScope ``_prepare_model_input``）。
         顶栏、Tokens 页、压缩前后的数字都必须同口径，否则 summary 和系统
         提示一长，显示值就会比触发值低，看起来像“提前压缩”。
         """
-        agent = self.agent
-        if agent is None:
+        agent = self.agent if agent is None else agent
+        toolkit = self.toolkit if toolkit is None else toolkit
+        if agent is None or toolkit is None:
             return {}
         get_prompt = getattr(agent, "_get_system_prompt", None)
         if get_prompt is None:
@@ -63,30 +72,87 @@ class HistoryMixin:
             if summary:
                 messages.append(UserMsg(name="user", content=summary))
             messages.extend(agent.state.context)
-            tools = await self._tool_schemas()
+            tools = await self._tool_schemas(agent, toolkit)
         except Exception:
             return {}
         return {"messages": messages, "tools": tools}
 
-    async def _context_tokens(self) -> int:
-        if self.agent is None or self.toolkit is None:
-            return 0
-        try:
-            kwargs = await self._context_input()
-            if kwargs:
-                return int(await self.agent.model.count_tokens(**kwargs))
-            tools = await self.toolkit.get_tool_schemas()
-            return int(
-                await self.agent.model.count_tokens(
-                    messages=self.agent.state.context, tools=tools
-                )
-            )
-        except Exception:
-            return 0
+    def _stats_stale(self, epoch: int, agent: Any, toolkit: Any, model: Any) -> bool:
+        """采样期间 agent / toolkit / model 是否已被替换，或会话已关闭。"""
+        return (
+            epoch != self._stats_epoch
+            or self._closed
+            or agent is not self.agent
+            or toolkit is not self.toolkit
+            or model is not getattr(self.agent, "model", None)
+        )
 
-    def _compaction_threshold(self) -> int:
-        """压缩触发点（tokens），与框架 ``trigger_ratio * context_size`` 一致。"""
+    async def _context_usage(self) -> dict[str, Any]:
+        """一次口径一致、带可用性与代际校验的上下文采样。
+
+        ``available=False`` 只表示计数失败或采样已过期，调用方不能把它
+        当成“有效但为 0”。顶栏和 Tokens 页都必须走这里，否则一处计数
+        失败、另一处工具 schema 计数成功，就会出现“可用 0 占用”。
+        """
         agent = self.agent
+        toolkit = self.toolkit
+        empty: dict[str, Any] = {
+            "available": False,
+            "used": 0,
+            "messages": 0,
+            "tools": 0,
+            "total": 0,
+            "threshold": 0,
+            "ratio": 0.0,
+            "stale": False,
+        }
+        if agent is None or toolkit is None:
+            return empty
+        model = getattr(agent, "model", None)
+        epoch = self._stats_epoch
+        if model is None:
+            return empty
+        try:
+            kwargs = await self._context_input(agent, toolkit)
+            if not kwargs:
+                raise ValueError("context input unavailable")
+            schemas = kwargs["tools"]
+            used = int(await model.count_tokens(**kwargs))
+            # 工具单独计数失败时，Messages/Tools 拆解不可信；整体也标不可用。
+            tools_tokens = int(
+                await model.count_tokens(messages=[], tools=schemas)
+            )
+            if used < 0 or tools_tokens < 0 or tools_tokens > used:
+                raise ValueError("context token count invalid")
+            total = int(getattr(model, "context_size", 0) or 0)
+            ratio = float(getattr(agent.context_config, "trigger_ratio", 0.0) or 0.0)
+            if not total or not ratio:
+                raise ValueError("context window unavailable")
+        except Exception:
+            result = dict(empty)
+            result["stale"] = self._stats_stale(epoch, agent, toolkit, model)
+            return result
+        return {
+            "available": True,
+            "used": used,
+            "messages": max(0, used - tools_tokens),
+            "tools": tools_tokens,
+            "total": total,
+            "threshold": int(total * ratio),
+            "ratio": ratio,
+            "stale": self._stats_stale(epoch, agent, toolkit, model),
+        }
+
+    async def _context_tokens(self) -> int:
+        """兼容旧调用：失败与过期都返回 0，需要区分时用 ``_context_usage``。"""
+        usage = await self._context_usage()
+        if not usage["available"] or usage["stale"]:
+            return 0
+        return int(usage["used"])
+
+    def _compaction_threshold(self, agent: Any | None = None) -> int:
+        """压缩触发点（tokens），与框架 ``trigger_ratio * context_size`` 一致。"""
+        agent = self.agent if agent is None else agent
         if agent is None:
             return 0
         try:
@@ -96,26 +162,81 @@ class HistoryMixin:
             return 0
 
     @staticmethod
-    def _compaction_detail(before: int, threshold: int, after: int) -> str:
-        """压缩卡的一行：压缩前实际用量 / 触发阈值 → 压缩后用量。"""
-        if not before or not after:
-            return ""
-        head = _format_tokens(before)
-        if threshold:
-            head += f" / {_format_tokens(threshold)}"
-        return f"{head} → {_format_tokens(after)}"
+    def _compaction_detail(
+        before: int | None,
+        threshold: int,
+        after: int | None,
+        *,
+        estimated: bool = False,
+    ) -> str:
+        """压缩卡的一行：压缩前用量 / 触发阈值 → 压缩后用量。
 
-    async def _record_compaction_async(self, summary: str, before: int) -> None:
-        """压缩已经发生，补算压缩后用量再落卡片并刷新顶栏。"""
-        after = await self._context_tokens()
+        只有中间件在真正压缩前量到的值才不加前缀；reply 侧兜底只能用最近
+        一次采样，必须显式标 ``est.``。任一侧缺失时写明不可用，不能拿 0
+        冒充有效计数。
+        """
+        if before is None or before <= 0:
+            head = "before unavailable"
+        else:
+            head = ("est. " if estimated else "") + _format_tokens(before)
+            if threshold:
+                head += f" / {_format_tokens(threshold)}"
+        tail = (
+            _format_tokens(after)
+            if after is not None and after > 0
+            else "after unavailable"
+        )
+        return f"{head} → {tail}"
+
+    async def _record_compaction_async(
+        self,
+        summary: str,
+        before: int | None,
+        *,
+        estimated: bool = False,
+    ) -> None:
+        """压缩已经发生，补算压缩后用量再落卡片并刷新顶栏。
+
+        这是没有中间件精确采样时的兜底路径；采样必须属于当前 agent 代际，
+        否则直接丢弃，避免把旧模型的用量混到新实例上。
+        """
+        usage = await self._context_usage()
+        if usage["stale"]:
+            return
+        after = usage["used"] if usage["available"] else None
+        threshold = (
+            usage["threshold"] if usage["available"] else self._compaction_threshold()
+        )
         detail = self._compaction_detail(
-            before, self._compaction_threshold(), after
-        ) or "older messages summarized"
+            before, threshold, after, estimated=estimated
+        )
+        self._remember_compaction(summary)
         self._record_compaction(summary, detail)
         await self._update_meta()
 
+    def _remember_compaction(self, summary: str) -> None:
+        self._recorded_compactions.append(summary)
+        if len(self._recorded_compactions) > 5:
+            del self._recorded_compactions[:-5]
+
+    async def _stop_meta_refresh(self) -> None:
+        """取消并等待统计刷新退出；清 dirty，禁止 finally 再拉起。"""
+        self._meta_halt = True
+        self._meta_dirty = False
+        task = self._meta_task
+        self._meta_task = None
+        if task is not None and not task.done():
+            await self._cancel_task(task)
+
+    def _resume_meta_refresh(self) -> None:
+        """重载结束后解除暂停；关闭状态保持永久停止。"""
+        if not self._closed:
+            self._meta_halt = False
+
     def _refresh_meta_soon(self) -> None:
         """请求刷新顶栏；已有刷新在跑时只置脏标记，由它合并处理。"""
+        if self._closed or self._meta_halt:
+            return
         self._meta_dirty = True
         task = self._meta_task
         if task is not None and not task.done():
@@ -125,8 +246,12 @@ class HistoryMixin:
     async def _meta_refresh_loop(self) -> None:
         try:
             while True:
+                if self._closed or self._meta_halt:
+                    break
                 self._meta_dirty = False
                 await self._update_meta()
+                if self._closed or self._meta_halt:
+                    break
                 # 忙的时候靠心跳持续量；空闲后没有新请求就退出
                 if not (self._busy or self._meta_dirty):
                     break
@@ -137,8 +262,8 @@ class HistoryMixin:
         finally:
             self._meta_task = None
             # 收尾这一瞬新来的请求会看到任务还没结束而直接退出，
-            # 这里补一次，避免最后一次统计丢掉。
-            if self._meta_dirty:
+            # 这里补一次，避免最后一次统计丢掉；停止/关闭时绝不复活。
+            if self._meta_dirty and not (self._closed or self._meta_halt):
                 self._refresh_meta_soon()
 
     async def _token_snapshot(self) -> dict[str, Any]:
@@ -156,25 +281,21 @@ class HistoryMixin:
             "available": False,
             "session": dict(self._session_usage),
         }
-        if self.agent is None or self.toolkit is None:
+        usage = await self._context_usage()
+        if not usage["available"] or usage["stale"]:
+            # 计数失败/过期与“有效 0 占用”必须区分：这里保持 available=False，
+            # 即使工具 schema 单独计数成功也不冒充可用。
+            if usage["total"]:
+                data["total"] = usage["total"]
             return data
-        try:
-            model = self.agent.model
-            schemas = await self._tool_schemas()
-            used = await self._context_tokens()
-            tools_tokens = int(
-                await model.count_tokens(messages=[], tools=schemas)
-            )
-            data.update(
-                used=used,
-                messages=max(0, used - tools_tokens),
-                tools=tools_tokens,
-                total=getattr(model, "context_size", 0) or data["total"],
-                ratio=self.agent.context_config.trigger_ratio,
-                available=True,
-            )
-        except Exception:  # 统计失败时退回粗算值
-            pass
+        data.update(
+            used=usage["used"],
+            messages=usage["messages"],
+            tools=usage["tools"],
+            total=usage["total"],
+            ratio=usage["ratio"],
+            available=True,
+        )
         return data
 
     def _emit_meta(self) -> None:
@@ -196,27 +317,48 @@ class HistoryMixin:
         label = f"{name} · {effort} · {mode}" if effort else f"{name} · {mode}"
         if self._meta_base in {"", "Starting…"}:
             self._meta_base = label
-        try:
-            model = self.agent.model
-            used = await self._context_tokens()
-            total = getattr(model, "context_size", 0) or 0
-            trigger = self.agent.context_config.trigger_ratio
-            if not used or not total:
-                raise ValueError("context stats unavailable")
-            self._usage_tokens = used
-            threshold = int(total * trigger)
-            self._meta_base = (
-                f"{label} · Context {used / 1000:.1f}k/"
-                f"{total / 1000:.0f}k ({used / total:.0%})"
-                f" · Compact at {threshold / 1000:.1f}k"
-            )
-        except Exception:
+        usage = await self._context_usage()
+        if usage["stale"]:
+            # 采样期间 agent/model 已更换：旧值不发布，等新实例自己刷新。
+            return
+        if not usage["available"] or not usage["used"] or not usage["total"]:
             self._meta_base = f"{label} · context stats unavailable"
+            self._emit_meta()
+            return
+        used = usage["used"]
+        total = usage["total"]
+        threshold = usage["threshold"]
+        self._usage_tokens = used
+        self._meta_base = (
+            f"{label} · Context {used / 1000:.1f}k/"
+            f"{total / 1000:.0f}k ({used / total:.0%})"
+            f" · Compact at {threshold / 1000:.1f}k"
+        )
         self._emit_meta()
 
     async def _notify_compacting(self, active: bool) -> None:
         """压缩中途的实时状态，仅用于界面提示。"""
         self.emit("compacting", {"active": active})
+
+    async def _on_compacted(
+        self,
+        summary: str,
+        before: int | None,
+        after: int | None,
+    ) -> None:
+        """中间件在真正压缩前后量到的精确数字，直接落卡。
+
+        这条路径在压缩完成的当下同步执行，卡片不会被异步统计挤到回答后面；
+        同轮多次压缩也各落一张，不会复用同一次回复开始时的旧快照。
+        """
+        if self._closed:
+            return
+        detail = self._compaction_detail(
+            before, self._compaction_threshold(), after
+        )
+        self._remember_compaction(summary)
+        self._record_compaction(summary, detail)
+        self._refresh_meta_soon()
 
     async def compact(self) -> dict[str, Any]:
         agent = self.agent
@@ -265,7 +407,11 @@ class HistoryMixin:
                 else:
                     detail = f"{before_msgs} → {after_msgs} messages"
                 summary = str(getattr(agent.state, "summary", "") or "")
-                self._record_compaction(summary, detail)
+                # 中间件在 compress_context 内已经按精确前后值落过卡，这里
+                # 只补没有回调的路径，避免手动压缩出现重复卡。
+                if summary not in self._recorded_compactions:
+                    self._remember_compaction(summary)
+                    self._record_compaction(summary, detail)
                 return {"compacted": True}
             raise SessionError(
                 "not_ready", "Context is below the compaction threshold; nothing to do"
@@ -292,14 +438,24 @@ class HistoryMixin:
             self._snapshots.clear_checkpoints()
         self._checkpoints = []
         self._revert = None
-        model = build_model()
-        backend = TrackedLocalBackend(workdir=str(workspace_path(create=True)))
-        self._backend = backend
-        self.agent, self.toolkit, _ = await build_agent(
-            model, backend, self.mcps, gate=self._permission_gate, ask=self._ask_user,
-            on_compacting=self._notify_compacting,
-            on_subagent_event=self._on_subagent_event,
-        )
+        await self._stop_meta_refresh()
+        self._stats_epoch += 1
+        try:
+            model = build_model()
+            backend = TrackedLocalBackend(workdir=str(workspace_path(create=True)))
+            self._backend = backend
+            self.agent, self.toolkit, _ = await build_agent(
+                model, backend, self.mcps, gate=self._permission_gate, ask=self._ask_user,
+                on_compacting=self._notify_compacting,
+                on_compacted=self._on_compacted,
+                on_subagent_event=self._on_subagent_event,
+            )
+        except BaseException:
+            self._resume_meta_refresh()
+            self._refresh_meta_soon()
+            raise
+        else:
+            self._resume_meta_refresh()
         # 清空后不塞任何占位消息：聊天区应该真正空白，提示只走一次性 toast
         self.history = []
         self._subagents = {}

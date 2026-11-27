@@ -108,6 +108,7 @@ class BootMixin:
             gate=self._permission_gate,
             ask=self._ask_user,
             on_compacting=self._notify_compacting,
+            on_compacted=self._on_compacted,
         )
         self.toolkit = toolkit
         # 历史在 agent 装配后从恢复的状态里取，和旧行为保持一致
