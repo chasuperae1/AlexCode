@@ -77,6 +77,10 @@ Thumbs.db
 desktop.ini
 *.swp
 
-assets/
+# 只跟踪默认提示音；其余音色留在本地，避免污染仓库
+assets/*
+!assets/sounds/
+assets/sounds/*
+!assets/sounds/06_chord_soft.wav
 
 .gitignore
